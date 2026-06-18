@@ -210,7 +210,8 @@ def _read_key():
     if not _HW:
         ch = sys.stdin.read(1)
         if ch == "\x1b":
-            return ("ESCSEQ", sys.stdin.read(2))
+            # PC 側も bytes に揃えて main() の比較を一本化
+            return ("ESCSEQ", sys.stdin.read(2).encode())
         return ch
 
     buf = bytearray(8)
@@ -256,13 +257,14 @@ def _show():
             pass
 
 
-def render(history, buf, message=""):
-    """履歴域 + 入力行を描画。"""
+def render(history, buf, cursor, message=""):
+    """履歴域 + 入力行を描画。cursor は buf 内のカーソル位置 (0 〜 len(buf))。"""
     if not _HW:
         # PC フォールバック: 端末に出力してロジックだけ確認
         for expr, res in history.items[-5:]:
             print("  {} = {}".format(expr, res))
-        print("> " + buf + ("   [" + message + "]" if message else ""))
+        shown = buf[:cursor] + "|" + buf[cursor:]
+        print("> " + shown + ("   [" + message + "]" if message else ""))
         return
 
     _clear()
@@ -281,13 +283,26 @@ def render(history, buf, message=""):
     if hasattr(_display, "hline"):
         _display.hline(0, sep_y, SCREEN_W, COL_DIM)
 
-    # --- 入力行 ---
-    prompt = "> " + buf
-    if len(prompt) > COLS:
-        prompt = prompt[-(COLS):]
+    # --- 入力行 (長い場合はカーソル位置が見える形で末尾寄せ) ---
+    prefix = "> "
+    full = prefix + buf
+    # 描画開始位置に対する buf 側の表示オフセット (左へ何文字スクロールしたか)
+    shift = 0
+    if len(full) > COLS:
+        shift = len(full) - COLS
+        prompt = full[shift:]
+    else:
+        prompt = full
     _draw_text(0, INPUT_ROW * CHAR_H, prompt, COL_FG)
 
-    # --- メッセージ (エラー等) を入力行右側 or 履歴最下に重ねる ---
+    # --- カーソル下線 (アクセント色) ---
+    cx_chars = len(prefix) + cursor - shift
+    if 0 <= cx_chars < COLS and hasattr(_display, "fill_rect"):
+        cx = cx_chars * CHAR_W
+        cy = INPUT_ROW * CHAR_H + CHAR_H - 1
+        _display.fill_rect(cx, cy, CHAR_W, 1, COL_ACC)
+
+    # --- メッセージ (エラー等) を入力行の 1 行上に表示 ---
     if message:
         msg = message[:COLS]
         _draw_text(0, (ROWS - 2) * CHAR_H, msg, COL_ACC)
@@ -300,14 +315,62 @@ def render(history, buf, message=""):
 def main():
     history = History()
     buf = ""
-    message = "Psephos  ENTER=calc  ESC=quit"
-    render(history, buf, message)
+    cursor = 0          # buf 内のカーソル位置 (0 〜 len(buf))
+    hist_idx = -1       # -1 = 編集中 (履歴閲覧モード外), 0 以上 = history.items のインデックス
+    saved_buf = ""      # 履歴閲覧開始時の編集中バッファを退避
+    saved_cursor = 0
+    message = "Psephos  ENTER=eval  ESC=quit  Up/Dn=history"
+    render(history, buf, cursor, message)
+
+    def _load_hist(idx):
+        # idx 番目の履歴を buf に読み込む
+        return history.items[idx][0]
 
     while True:
         key = _read_key()
 
-        # エスケープシーケンス (矢印キー等) -- 最小実装では無視
-        if isinstance(key, tuple):
+        # --- エスケープシーケンス (矢印, Home/End 等) ---
+        if isinstance(key, tuple) and key[0] == "ESCSEQ":
+            seq = key[1]
+            if seq == b"[A":          # ↑: 古い履歴へ
+                if history.items:
+                    if hist_idx == -1:
+                        saved_buf = buf
+                        saved_cursor = cursor
+                        hist_idx = len(history.items) - 1
+                    elif hist_idx > 0:
+                        hist_idx -= 1
+                    buf = _load_hist(hist_idx)
+                    cursor = len(buf)
+                    render(history, buf, cursor, message)
+            elif seq == b"[B":        # ↓: 新しい履歴 or 編集中バッファ復元
+                if hist_idx != -1:
+                    if hist_idx < len(history.items) - 1:
+                        hist_idx += 1
+                        buf = _load_hist(hist_idx)
+                        cursor = len(buf)
+                    else:
+                        hist_idx = -1
+                        buf = saved_buf
+                        cursor = saved_cursor
+                    render(history, buf, cursor, message)
+            elif seq == b"[D":        # ←: カーソル左
+                if cursor > 0:
+                    cursor -= 1
+                    render(history, buf, cursor, message)
+            elif seq == b"[C":        # →: カーソル右
+                if cursor < len(buf):
+                    cursor += 1
+                    render(history, buf, cursor, message)
+            elif seq == b"[H":        # Home: 行頭
+                if cursor != 0:
+                    cursor = 0
+                    render(history, buf, cursor, message)
+            elif seq == b"[F":        # End: 行末
+                if cursor != len(buf):
+                    cursor = len(buf)
+                    render(history, buf, cursor, message)
+            # その他のシーケンス (Shift+矢印, Delete 等) は無視
             continue
 
         if key == KEY_ESC:
@@ -317,6 +380,9 @@ def main():
 
         if key in (KEY_ENTER, KEY_ENTER2):
             expr = buf.strip()
+            hist_idx = -1
+            saved_buf = ""
+            saved_cursor = 0
             if not expr:
                 continue
             try:
@@ -329,18 +395,22 @@ def main():
             except Exception as ex:
                 message = "Error: " + str(ex)[:COLS - 8]
             buf = ""
-            render(history, buf, message)
+            cursor = 0
+            render(history, buf, cursor, message)
             continue
 
         if key in (KEY_BACKSPACE, KEY_BACKSPACE2):
-            buf = buf[:-1]
-            render(history, buf, message)
+            if cursor > 0:
+                buf = buf[:cursor - 1] + buf[cursor:]
+                cursor -= 1
+                render(history, buf, cursor, message)
             continue
 
-        # 通常文字 (印字可能のみ受理)
+        # 通常文字 (印字可能のみ受理) -- カーソル位置に挿入
         if isinstance(key, str) and len(key) == 1 and 32 <= ord(key) < 127:
-            buf += key
-            render(history, buf, message)
+            buf = buf[:cursor] + key + buf[cursor:]
+            cursor += 1
+            render(history, buf, cursor, message)
 
 
 def _format(value):
