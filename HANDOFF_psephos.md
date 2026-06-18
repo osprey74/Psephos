@@ -1,0 +1,175 @@
+# HANDOFF_psephos.md — Psephos（関数電卓 for PicoCalc）
+
+> Claude Code 向けハンドオフ。`DESIGN.md` と `psephos.py`（MVP プロトタイプ）を前提とする。
+> 名称確定: **Psephos**（ψῆφος = 計算に用いた小石）。
+
+- **作成日**: 2026-06-18 (JST)
+- **対象ハード**: ClockworkPi PicoCalc + Raspberry Pi Pico 2W（RP2350）
+- **実行環境**: MicroPython（LofiFren / zenodante 系ファームウェア）
+- **ライセンス**: MIT
+- **リポジトリ想定**: `osprey74/psephos`
+
+---
+
+## 0. このドキュメントの読み方
+
+`psephos.py` は **ロジック検証済み・ハード連携未検証** の MVP です。
+Claude Code の最初の仕事は「実機に当てて動く状態にすること」であり、
+新規実装ではなく **既存プロトタイプの実機適合（§3 Phase 1）** から始めてください。
+
+Phase 1 を完了するまで Phase 2 以降に着手しないこと。
+
+---
+
+## 1. 現状（What exists）
+
+| ファイル | 状態 |
+|---|---|
+| `DESIGN.md` | 完成。設計の単一の真実（SSOT）。 |
+| `psephos.py` | MVP。式評価・履歴・永続化・エラー処理を実装。PC 上でコアロジック検証済み。 |
+| `HANDOFF_psephos.md` | 本書。 |
+
+### 検証済み（PC フォールバック上）
+
+- 四則・優先順位（`1+2*3 → 7`）
+- 三角・平方根・対数（`sin(pi/6) → 0.5`, `sqrt(2)`, `log(e) → 1`）
+- べき乗（`2**10 → 1024`）、角度変換（`degrees(pi) → 180`）
+- `ans` 連鎖（直前結果の再利用）
+- **セキュリティ**: `__import__("os").listdir()` が `NameError` で遮断
+- ゼロ除算 → `ZeroDivisionError` 捕捉
+- 結果整形（`180.0 → 180`、非整数は有効数字10桁）
+
+### 未検証（実機依存）
+
+- キーボード入力（`_read_key()`）
+- 画面描画（色番号・`show()` 要否）
+- SD カードへの履歴永続化（実機 `/sd` マウント挙動）
+
+---
+
+## 2. セットアップ（環境準備）
+
+> 既存の PicoCalc MicroPython 環境がある前提。なければ LofiFren の手順に従う。
+
+1. Pico 2W に `picocalc_micropython_pico2w.uf2`（LofiFren 版）を書き込み済みであること。
+   - BOOTSEL 押しながら USB 接続 → `RPI-RP2` ドライブに UF2 をコピー。
+2. `/modules/` に `picocalc.py` 等のドライバ群が配置済みであること。
+3. SD カードを FAT32 でフォーマットし挿入（履歴永続化に使用）。
+4. 開発は LofiFren の Dashboard（`python3 MicroPython/tools/dashboard.py`）または
+   Thonny / mpremote を使用。`psephos.py` は SD の `/sd/py_scripts/` に配置し、
+   メニューから起動する想定。
+
+---
+
+## 3. タスク（Phase 1：実機適合 = 最優先）
+
+### T1. 実機ドライバ API の確定 ★最重要
+
+LofiFren / zenodante の実機 `picocalc.py` を読み、以下を**事実として**確認する。
+推測で進めず、ソースまたは実機 REPL で確かめること。
+
+1. **キーボード取得 API**
+   - `_read_key()` は現状 `sys.stdin.read(1)` を仮置きしている。
+   - 実機での正しいキー取得方法（`picocalc.keyboard` の有無、関数名、戻り値、
+     ブロッキング/ノンブロッキングの別）を確認し、`_read_key()` を置換する。
+   - Backspace / Enter / ESC / 矢印キーの実際のコードを実機で採取し、定数を更新する。
+
+2. **色番号（LUT）**
+   - `COL_FG=15 / COL_BG=0 / COL_DIM=8 / COL_ACC=11` が当該 LUT（既定 vt100）で
+     意図通りの見た目になるか実機確認。ずれていれば調整する。
+
+3. **`display.show()` の要否**
+   - zenodante ドライバは Core1 が常時リフレッシュする設計のため、`show()` 呼び出しが
+     不要、もしくは passive モード時のみ必要な可能性がある。
+   - 実機で描画が出ない/ちらつく場合は `stopRefresh()/recoverRefresh()/show(0)` の
+     扱いを DESIGN.md §8 と照合して調整する。
+
+> **完了条件**: PicoCalc 実機で起動し、数式を打って Enter で結果が履歴に積まれ、
+> ESC で抜けられること。
+
+### T2. SD 永続化の実機確認
+
+- `/sd/psephos_history.txt` への追記と、再起動後のロードが実機で動くこと。
+- SD 未挿入時にクラッシュせずメモリのみで動くこと（`OSError` 握りつぶし）を確認。
+
+### T3. 入力可能文字の実機調整
+
+- 数式に必要な記号（`+ - * / ( ) . , ** %` 等）が PicoCalc キーボードで
+  入力できるか確認。Fn キー等が必要な記号があれば DESIGN/README に明記。
+
+---
+
+## 4. タスク（Phase 2 以降：実機適合の完了後）
+
+### Phase 2 — 履歴の活用
+- 上下キーで履歴を遡り、選んだ式を入力行へ呼び出して再編集できるようにする。
+- カーソル位置編集（左右キー）を追加（現状は末尾追加と Backspace のみ）。
+
+### Phase 3 — 機能拡張
+- ユーザ定義変数（`x = 3` を評価セッション中に保持）。
+- 進数入力・表示（`hex() / bin()`、結果の16進併記）。
+- `ans` の多段参照またはヒストリ番号参照（`#3` 等）。
+
+### Phase 4 — 仕上げ
+- 関数一覧ヘルプ画面（対応関数の早見）。
+- テーマ切替（`switchPredefinedLUT`）。
+- 設定ファイル（有効数字桁数・履歴上限・テーマ）。
+- 履歴ファイルのローテーション（肥大化対策）。
+
+---
+
+## 5. コーディング規約・制約
+
+- **MicroPython 互換のみ**。CPython 専用機能（f-string は可だが、型ヒント実行時評価や
+  一部標準ライブラリは不可）に注意。`str.format()` を基本とする。
+- **メモリ意識**: 履歴は `HISTORY_MAX`(=200) で上限。大きな中間リストを作らない。
+- **例外で落とさない**: 評価・I/O は必ず捕捉し、画面メッセージに変換する。
+- **セキュリティ維持**: `eval` の `__builtins__` 無効化を**絶対に外さない**。
+  関数追加は `_build_namespace()` への明示追加のみ。
+- **移植容易性維持**: ハード依存は `_read_key()` と描画ヘルパ（`_draw_text/_clear/_show`）に
+  閉じ込める。ロジック層（`evaluate/History/_format`）にハード依存を混ぜない。
+
+---
+
+## 6. テスト指針
+
+### ロジック（PC 上で実行可能、ハード不要）
+- `evaluate()` の正常系（§1 の検証項目を回帰テスト化）。
+- 異常系：構文エラー、未定義名、ゼロ除算、空入力。
+- セキュリティ：`__import__` / `open` / `eval` 自体が遮断されること。
+- `History` の add/load/clear（一時ファイルで検証）。
+
+### 実機
+- T1〜T3 の完了条件を手動確認（チェックリスト化推奨）。
+
+---
+
+## 7. 受け入れ基準（Definition of Done）
+
+**Phase 1 完了 = 以下すべて**
+- [ ] 実機で起動し、数式入力 → Enter → 履歴に結果が積まれる
+- [ ] ESC でメニュー/REPL に戻れる
+- [ ] 再起動後も履歴が復元される（SD 永続化）
+- [ ] SD 未挿入でもクラッシュしない
+- [ ] エラー入力でクラッシュせずメッセージ表示
+- [ ] `eval` のセキュリティ防御が維持されている
+
+---
+
+## 8. 未解決の質問（着手前に判断 or 総司へ確認）
+
+1. キーボードの記号入力に Fn 等の修飾が要る場合、`**`（べき乗）の入力 UX をどうするか。
+   → 代替として `^` を内部で `**` に変換する糖衣構文を入れるか検討（DESIGN 未記載・要判断）。
+2. 履歴の表示順は「古い→新しい（最新が下）」で確定でよいか（現状実装）。
+3. 起動メニュー名・アイコンの扱い（py_scripts での表示名）。
+
+---
+
+## 出典 / 参考
+
+- DESIGN.md（本リポジトリ）— 設計の SSOT
+- zenodante/PicoCalc-micropython-driver（display=framebuf サブクラス、LUT、show/refresh 仕様）:
+  https://github.com/zenodante/PicoCalc-micropython-driver
+- LofiFren/PicoCalc（Pico 2W 向け UF2、modules 構成、HW 表、Dashboard/MCP）:
+  https://github.com/LofiFren/PicoCalc
+- MicroPython `math`: https://docs.micropython.org/en/latest/library/math.html

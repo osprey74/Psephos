@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# MicroPython
+*.mpy
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local runtime artifacts (動作確認時に生成される履歴ファイル等)
+psephos_history.txt
+/sd/
