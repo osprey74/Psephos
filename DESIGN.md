@@ -53,8 +53,13 @@ graphing calculator をいじっていた頃の感覚を、PicoCalc の物理 QW
 - 指数対数: `exp log log10 sqrt pow`
 - 端数: `floor ceil fabs abs round`
 - 角度: `radians degrees`
+- 進数変換: `hex bin oct int float`（Phase 3）
 - 定数: `pi e tau`
-- 補助: `min max ans`
+- 補助: `min max`
+- 直近結果: `ans`（最新）/ `ans2 ans3 ... ans10`（N 計算前）
+- ユーザ変数: `x = 3` 形式で代入、セッション中保持（Phase 3）
+
+数値リテラルは 10 進・16 進 (`0xFF`)・2 進 (`0b101`)・8 進 (`0o777`)・指数表記 (`1.5e-10`) を受理。
 
 > 拡張する場合は `_build_namespace()` に追記するだけでよい。
 
@@ -183,9 +188,9 @@ eval(expr, {"__builtins__": {}}, local)
 ## 9. ロードマップ
 
 - **Phase 1**（MVP / 本プロトタイプ）— ✅ 完了 2026-06-18: 入力・評価・履歴・永続化・エラー処理
-- **Phase 2** — ✅ 完了 2026-06-18: 上下キーで履歴呼び出し＆再編集、左右キーでカーソル移動、Home/End 対応。`ans2 ans3...` 多段参照は Phase 3 へ送り
-- **Phase 3**: ユーザ定義変数（`x = 3` を保持）、16進/2進入力（`hex()/bin()`）、`ans` 多段参照
-- **Phase 4**: テーマ（LUT 切替）、関数一覧ヘルプ画面、設定ファイル
+- **Phase 2** — ✅ 完了 2026-06-18: 上下キーで履歴呼び出し＆再編集、左右キーでカーソル移動、Home/End 対応
+- **Phase 3** — ✅ 完了 2026-06-18: ユーザ定義変数 (`x = 3` セッション中保持)、16進/2進/8進リテラル (`0xFF` `0b101` `0o777`)、`hex/bin/oct/int/float` 関数、`ans` 多段参照 (`ans2`〜`ans10`)
+- **Phase 4**: テーマ（LUT 切替）、関数一覧ヘルプ画面、設定ファイル、グラフ描画（Phase 5 候補）
 
 ---
 

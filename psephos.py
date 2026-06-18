@@ -64,6 +64,8 @@ def _build_namespace():
         "abs": abs, "round": round,
         # 角度変換
         "radians": math.radians, "degrees": math.degrees,
+        # 進数変換 (Phase 3)
+        "hex": hex, "bin": bin, "oct": oct, "int": int, "float": float,
         # 定数
         "pi": math.pi, "e": math.e, "tau": getattr(math, "tau", 2 * math.pi),
         # ユーティリティ
@@ -73,29 +75,44 @@ def _build_namespace():
 
 
 _NAMESPACE = _build_namespace()
-_ANS = 0.0   # 直前の計算結果 (ans で参照可能)
+_ANS = 0.0           # 直前の計算結果 (ans で参照可能)
+_ANS_HISTORY = []    # 結果スタック (最新が index 0)。ans2..ans10 で参照可能
+_ANS_DEPTH = 10
+_USER_VARS = {}      # ユーザ定義変数 (セッション中のみ保持)
 
 
 def _extract_names(expr):
-    """式中の識別子を抽出。数値リテラルの指数部 (1e5 の e) は除外する。"""
+    """式中の識別子を抽出。数値リテラル (10進/16進/2進/8進/指数表記) は除外する。"""
     names = []
     i = 0
     n = len(expr)
     while i < n:
         c = expr[i]
         if c.isdigit() or (c == "." and i + 1 < n and expr[i + 1].isdigit()):
-            # 数値リテラル: 1.5e-10 などを丸ごと消費して識別子扱いを避ける
-            i += 1
-            while i < n:
-                ch = expr[i]
-                if ch.isdigit() or ch == ".":
+            # 数値リテラル: 0x.. / 0b.. / 0o.. / 10進 / 1.5e-10 等を丸ごと消費
+            if c == "0" and i + 1 < n and expr[i + 1] in "xXbBoO":
+                prefix = expr[i + 1]
+                if prefix in "xX":
+                    valid = "0123456789abcdefABCDEF_"
+                elif prefix in "bB":
+                    valid = "01_"
+                else:  # oO
+                    valid = "01234567_"
+                i += 2
+                while i < n and expr[i] in valid:
                     i += 1
-                elif ch in "eE":
-                    i += 1
-                    if i < n and expr[i] in "+-":
+            else:
+                i += 1
+                while i < n:
+                    ch = expr[i]
+                    if ch.isdigit() or ch == ".":
                         i += 1
-                else:
-                    break
+                    elif ch in "eE":
+                        i += 1
+                        if i < n and expr[i] in "+-":
+                            i += 1
+                    else:
+                        break
         elif c.isalpha() or c == "_":
             j = i
             # MicroPython の一部ビルドに str.isalnum() が無いため isalpha/isdigit で代替
@@ -107,6 +124,42 @@ def _extract_names(expr):
     return names
 
 
+def _is_identifier(s):
+    """有効な Python 識別子か判定。"""
+    if not s:
+        return False
+    if not (s[0].isalpha() or s[0] == "_"):
+        return False
+    for c in s[1:]:
+        if not (c.isalpha() or c.isdigit() or c == "_"):
+            return False
+    return True
+
+
+def _is_reserved_target(name):
+    """代入の左辺として使用禁止の予約名か判定。"""
+    if name in _NAMESPACE:
+        return True
+    if name == "ans":
+        return True
+    if name.startswith("ans") and name[3:] and name[3:].isdigit():
+        return True
+    return False
+
+
+def _is_allowed_name(name):
+    """式中の識別子として許可されているか判定。"""
+    if name in _NAMESPACE:
+        return True
+    if name == "ans":
+        return True
+    if name.startswith("ans") and name[3:] and name[3:].isdigit():
+        return True
+    if name in _USER_VARS:
+        return True
+    return False
+
+
 def _check_safe(expr):
     """安全でない式を ValueError で弾く。
 
@@ -114,23 +167,78 @@ def _check_safe(expr):
     遮断しない (CPython と挙動が異なり、実機で確認済 2026-06-18)。
     そこで字句レベルで識別子をホワイトリスト方式で検査する追加防御を行う:
       1. "__" を含む式は拒否 (dunder 経由のリフレクション攻撃を遮断)
-      2. _NAMESPACE のキーまたは "ans" 以外の識別子を拒否
+      2. _NAMESPACE / "ans" / "ans<N>" / ユーザ変数以外の識別子を拒否
     """
     if "__" in expr:
         raise ValueError("disallowed: __ in expr")
     for ident in _extract_names(expr):
-        if ident not in _NAMESPACE and ident != "ans":
+        if not _is_allowed_name(ident):
             raise ValueError("disallowed name: " + ident)
 
 
-def evaluate(expr):
-    """式文字列を評価して結果を返す。例外は呼び出し側で処理。"""
-    global _ANS
-    _check_safe(expr)
+def _split_assignment(expr):
+    """代入式なら (lhs, rhs) を返す。そうでなければ None。
+
+    `==` `<=` `>=` `!=` の `=` は代入と誤判定しない。複合代入 (`+=` 等) は非対応。
+    """
+    n = len(expr)
+    i = 0
+    while i < n:
+        if expr[i] == "=":
+            prev_c = expr[i - 1] if i > 0 else ""
+            next_c = expr[i + 1] if i + 1 < n else ""
+            if next_c == "=":
+                i += 2
+                continue
+            if prev_c in "<>!=+-*/%":
+                i += 1
+                continue
+            return expr[:i].strip(), expr[i + 1:].strip()
+        i += 1
+    return None
+
+
+def _build_locals():
+    """eval 用の locals 辞書を構築 (NAMESPACE + ans + ans2..ansN + ユーザ変数)。"""
     local = dict(_NAMESPACE)
     local["ans"] = _ANS
-    result = eval(expr, {"__builtins__": {}}, local)
-    _ANS = result
+    for k in range(2, _ANS_DEPTH + 1):
+        if k - 1 < len(_ANS_HISTORY):
+            local["ans" + str(k)] = _ANS_HISTORY[k - 1]
+    local.update(_USER_VARS)
+    return local
+
+
+def _record_ans(value):
+    """直近結果と ans スタックを更新。"""
+    global _ANS
+    _ANS = value
+    _ANS_HISTORY.insert(0, value)
+    if len(_ANS_HISTORY) > _ANS_DEPTH:
+        del _ANS_HISTORY[_ANS_DEPTH:]
+
+
+def evaluate(expr):
+    """式文字列を評価して結果を返す。代入式 (`x = ...`) も許容。例外は呼び出し側で処理。"""
+    expr = expr.strip()
+    assignment = _split_assignment(expr)
+    if assignment is not None:
+        lhs, rhs = assignment
+        if not _is_identifier(lhs):
+            raise ValueError("invalid assignment target: " + lhs)
+        if _is_reserved_target(lhs):
+            raise ValueError("reserved name: " + lhs)
+        if not rhs:
+            raise ValueError("empty RHS")
+        _check_safe(rhs)
+        result = eval(rhs, {"__builtins__": {}}, _build_locals())
+        _USER_VARS[lhs] = result
+        _record_ans(result)
+        return result
+
+    _check_safe(expr)
+    result = eval(expr, {"__builtins__": {}}, _build_locals())
+    _record_ans(result)
     return result
 
 
@@ -272,7 +380,11 @@ def render(history, buf, cursor, message=""):
     visible = history.items[-HISTORY_ROWS:]
     row = 0
     for expr, res in visible:
-        line = "{} = {}".format(expr, res)
+        # 代入式 `x = 5` で結果も `5` のとき "x = 5 = 5" になるのを抑制
+        if expr.endswith(" = " + res) or expr.endswith("=" + res):
+            line = expr
+        else:
+            line = "{} = {}".format(expr, res)
         if len(line) > COLS:
             line = line[:COLS - 1] + "~"
         _draw_text(0, row * CHAR_H, line, COL_DIM)
