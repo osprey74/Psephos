@@ -76,12 +76,59 @@ _NAMESPACE = _build_namespace()
 _ANS = 0.0   # 直前の計算結果 (ans で参照可能)
 
 
+def _extract_names(expr):
+    """式中の識別子を抽出。数値リテラルの指数部 (1e5 の e) は除外する。"""
+    names = []
+    i = 0
+    n = len(expr)
+    while i < n:
+        c = expr[i]
+        if c.isdigit() or (c == "." and i + 1 < n and expr[i + 1].isdigit()):
+            # 数値リテラル: 1.5e-10 などを丸ごと消費して識別子扱いを避ける
+            i += 1
+            while i < n:
+                ch = expr[i]
+                if ch.isdigit() or ch == ".":
+                    i += 1
+                elif ch in "eE":
+                    i += 1
+                    if i < n and expr[i] in "+-":
+                        i += 1
+                else:
+                    break
+        elif c.isalpha() or c == "_":
+            j = i
+            # MicroPython の一部ビルドに str.isalnum() が無いため isalpha/isdigit で代替
+            while i < n and (expr[i].isalpha() or expr[i].isdigit() or expr[i] == "_"):
+                i += 1
+            names.append(expr[j:i])
+        else:
+            i += 1
+    return names
+
+
+def _check_safe(expr):
+    """安全でない式を ValueError で弾く。
+
+    MicroPython の eval は {"__builtins__": {}} を渡しても組み込み関数を
+    遮断しない (CPython と挙動が異なり、実機で確認済 2026-06-18)。
+    そこで字句レベルで識別子をホワイトリスト方式で検査する追加防御を行う:
+      1. "__" を含む式は拒否 (dunder 経由のリフレクション攻撃を遮断)
+      2. _NAMESPACE のキーまたは "ans" 以外の識別子を拒否
+    """
+    if "__" in expr:
+        raise ValueError("disallowed: __ in expr")
+    for ident in _extract_names(expr):
+        if ident not in _NAMESPACE and ident != "ans":
+            raise ValueError("disallowed name: " + ident)
+
+
 def evaluate(expr):
     """式文字列を評価して結果を返す。例外は呼び出し側で処理。"""
     global _ANS
+    _check_safe(expr)
     local = dict(_NAMESPACE)
     local["ans"] = _ANS
-    # __builtins__ を空にして任意コード実行を防止
     result = eval(expr, {"__builtins__": {}}, local)
     _ANS = result
     return result
@@ -136,24 +183,55 @@ class History:
 # ここでは「1 文字を待って返す」ブロッキング取得を実装する。
 
 import sys
+import time
 
-# 特殊キーコード (VT100 端末由来。実機で要確認・調整)
+# 特殊キーコード
 KEY_ENTER = "\n"
 KEY_ENTER2 = "\r"
 KEY_BACKSPACE = "\x08"
 KEY_BACKSPACE2 = "\x7f"
 KEY_ESC = "\x1b"
 
+POLL_MS = 10   # 実機キーポーリング間隔
+
 
 def _read_key():
-    """1 文字(またはエスケープシーケンス)を返すブロッキング入力。
-    実機キーボード API が異なる場合はこの関数のみ差し替える。"""
-    ch = sys.stdin.read(1)
-    if ch == "\x1b":
-        # 矢印キー等のエスケープシーケンスを読み飛ばす簡易処理
-        seq = sys.stdin.read(2)
-        return ("ESCSEQ", seq)
-    return ch
+    """1 文字(または特殊キー/エスケープシーケンス)を返すブロッキング入力。
+
+    実機 (PicoCalc): picocalc.keyboard.readinto(buf) は非ブロッキング。
+    キーは 1 回の呼び出しで完全な形で返る (実機検証済 2026-06-18):
+        - 通常文字: 1 byte
+        - Enter:    b'\\r\\n'   (2 byte)
+        - Esc 単押: b'\\x1b\\x1b' (2 byte, picocalc.py 流儀)
+        - 矢印:     b'\\x1b[A/B/C/D'
+        - Backspace: 0x7F
+    PC フォールバックでは従来通り sys.stdin で動作。
+    """
+    if not _HW:
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            return ("ESCSEQ", sys.stdin.read(2))
+        return ch
+
+    buf = bytearray(8)
+    while True:
+        try:
+            n = picocalc.keyboard.readinto(buf)
+        except OSError:
+            n = None
+        if n:
+            break
+        time.sleep_ms(POLL_MS)
+
+    if n >= 2 and buf[0] == 0x1b and buf[1] == 0x1b:
+        return KEY_ESC
+    if buf[0] == 0x1b:
+        return ("ESCSEQ", bytes(buf[1:n]))
+    if buf[0] in (0x0A, 0x0D):
+        return KEY_ENTER
+    if buf[0] in (0x08, 0x7F):
+        return KEY_BACKSPACE
+    return chr(buf[0])
 
 
 # ---- 描画 ----------------------------------------------------------------

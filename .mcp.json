@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "picocalc": {
+      "command": "picocalc-mcp"
+    }
+  }
+}

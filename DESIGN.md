@@ -117,17 +117,46 @@ graphing calculator をいじっていた頃の感覚を、PicoCalc の物理 QW
 
 ## 7. セキュリティ設計（重要）
 
-`eval` は任意コード実行のリスクがある。本実装では：
+`eval` は任意コード実行のリスクがある。本実装は **2 層防御** で対応：
 
 ```python
+# 第1層: 識別子ホワイトリスト検査（評価前）
+_check_safe(expr)
+# 第2層: builtins 抑制 + 許可名のみの locals
 eval(expr, {"__builtins__": {}}, local)
 ```
 
-- 第2引数（globals）の `__builtins__` を空 dict にし、`__import__` や
-  `open` 等を**呼べなくする**
-- 第3引数（locals）に許可関数・定数のみを渡す
+### CPython と MicroPython の挙動差（実機検証 2026-06-18）
 
-検証済み: `__import__("os").listdir()` は `NameError` で遮断される。
+| 環境 | `eval(expr, {"__builtins__": {}}, ...)` の効果 |
+|---|---|
+| CPython 3.x | `__import__ / open / exec / eval / compile / globals / getattr / input` を遮断 |
+| MicroPython 1.25 (Pico 2W) | **遮断しない**。これら組み込みは依然として呼び出し可能 |
+
+つまり MicroPython では builtins 抑制が機能せず、`__import__("os").listdir()`
+が普通に通る。これを発見した経緯と対策：
+
+- 発見: 実機で `__import__('os')` が `<module 'os'>` を返した（CPython では `NameError`）
+- 原因: MicroPython の `eval` は CPython と異なり、第2引数の `__builtins__` 空 dict を
+  実質無視する設計（既知の互換性差）
+- 対策: 評価前に **字句レベルで識別子ホワイトリスト検査**を行う `_check_safe()` を追加
+
+### `_check_safe()` の仕様
+
+1. **`__` を含む式は拒否**（dunder 経由のリフレクション攻撃を遮断）
+2. 識別子を抽出（数値リテラルの指数部 `1e5` の `e` は除外する独自トークナイザ）
+3. `_NAMESPACE` のキーまたは `"ans"` 以外の識別子があれば拒否
+
+### 実機検証結果（全 10 攻撃をブロック、全 8 正常系を通過）
+
+| 入力 | 期待 | 実機結果 |
+|---|---|---|
+| `1+2*3`, `sin(pi/6)`, `sqrt(2)`, `2**10`, `1.5e-10*2`, `ans+50` 等 | OK | ✅ |
+| `__import__('os').listdir()` | BLOCK | ✅ `disallowed: __ in expr` |
+| `open('/sd/evil.txt','w')` | BLOCK | ✅ `disallowed name: open` |
+| `exec / eval / compile / globals / getattr / input(…)` | BLOCK | ✅ |
+| `().__class__` | BLOCK | ✅ `disallowed: __ in expr` |
+| `[c for c in 'abc']` | BLOCK | ✅ `disallowed name: c` |
 
 > 注意: これは「自分用電卓」前提の防御。完全なサンドボックスではない。
 > 不特定多数に配布する場合は、字句解析ベースのパーサ等への置換を検討。
@@ -162,9 +191,15 @@ eval(expr, {"__builtins__": {}}, local)
 
 ## 10. 既知のリスク・留意点
 
-- MicroPython の `math` は単精度な場合あり。高精度計算要件があれば要検証。
+- **MicroPython の `math` は単精度**（実機確認 2026-06-18 / Pico 2W / MicroPython 1.25）。
+  - 例: `sqrt(2) → 1.414214`（CPython の `1.4142135623730951` に対し有効桁約 7 桁）。
+- **MicroPython で `eval` の `__builtins__` 抑制が効かない** → §7 のホワイトリスト方式で代替（実機確認済）。
+- **MicroPython 一部ビルドに `str.isalnum()` 不在** → `isalpha() or isdigit()` で代替（`_extract_names` 内）。
 - キーボードのエスケープシーケンス処理は最小実装（矢印キーは現状無視）。
 - 履歴ファイルは追記のみのため、長期運用で肥大化する。Phase 2 でローテーション検討。
+- **LofiFren ファームウェア固有の留意点**:
+  - boot.py の `initsd` 前 sleep 500ms が短く、コールドブート時に SD 自動マウントが失敗することがある（手動 `initsd()` で回復可能）。
+  - VT100 dupterm が常時アクティブなため、mpremote exec 経由で起動した場合に過去のメニュー描画残骸（シアン色の `q` 等）が画面に残ることがある。通常のメニュー起動では発生しない。
 
 ---
 
