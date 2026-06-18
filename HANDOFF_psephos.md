@@ -118,11 +118,13 @@ LofiFren / zenodante の実機 `picocalc.py` を読み、以下を**事実とし
 - 比較演算子 (`==` `<=` `>=` `!=`) は代入として誤判定しない
 - 攻撃を含む RHS は `_check_safe` で遮断（例: `x = __import__('os')`）
 
-### Phase 4 — 仕上げ
-- 関数一覧ヘルプ画面（対応関数の早見）。
-- テーマ切替（`switchPredefinedLUT`）。
-- 設定ファイル（有効数字桁数・履歴上限・テーマ）。
-- 履歴ファイルのローテーション（肥大化対策）。
+### Phase 4 — 仕上げ — ✅ 完了 (2026-06-18 実機検証)
+- [x] 関数一覧ヘルプ画面（`help` + Enter で全画面表示、任意キーで戻る）
+- [x] テーマ切替（`theme` で一覧、`theme <name>` で適用、5 種類: default/amber/green/cyan/invert）
+- [x] 設定ファイル `/sd/psephos_config.txt`（theme/precision/history_max を永続化、起動時自動ロード）
+- [ ] 履歴ファイルのローテーション（肥大化対策、Phase 5 候補に送り）
+
+> 補足: LofiFren ファームウェアは `switchPredefinedLUT` API を提供せず、C ドライバ内に LUT が固定で焼き込まれている。標準 VT100 16 色パレットなので、`COL_FG/BG/DIM/ACC` のスロット番号を入れ替えるだけでテーマを実現した（C 側変更不要）。
 
 ---
 

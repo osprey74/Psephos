@@ -36,14 +36,75 @@ ROWS = SCREEN_H // CHAR_H      # 40
 INPUT_ROW = ROWS - 1
 HISTORY_ROWS = ROWS - 2        # 最下行=入力, その上1行=区切り
 
-# 4bit LUT 上の論理色 (VT100 LUT 既定: 0=黒, 15=白 を想定)
+# 4bit LUT 上の論理色 (VT100 LUT 既定: 0=黒, 1=赤, 2=緑, 3=黄, 4=青,
+# 5=マゼンタ, 6=シアン, 7=明灰, 8=暗灰, 9〜15=各色の明るい版・白)
+# テーマ切替で書き換えるため module global で保持。
 COL_BG = 0
 COL_FG = 15
 COL_DIM = 8
 COL_ACC = 11   # アクセント (結果表示)
 
+# テーマ: (FG, BG, DIM, ACC) のタプル
+_THEMES = {
+    "default": (15, 0, 8, 11),    # 白文字 / 黒地 / 暗灰 / 黄アクセント
+    "amber":   (11, 0, 3, 15),    # 黄文字 / 黒地 / 暗黄 / 白アクセント
+    "green":   (10, 0, 2, 15),    # 緑文字 / 黒地 / 暗緑 / 白アクセント
+    "cyan":    (14, 0, 6, 15),    # シアン文字 / 黒地 / 暗シアン / 白アクセント
+    "invert":  (0, 15, 8, 1),     # 黒文字 / 白地 / 暗灰 / 暗赤
+}
+
+
+def _apply_theme(name):
+    """テーマ名から論理色を更新。未知の名前は False を返す。"""
+    global COL_FG, COL_BG, COL_DIM, COL_ACC
+    if name in _THEMES:
+        COL_FG, COL_BG, COL_DIM, COL_ACC = _THEMES[name]
+        return True
+    return False
+
+
 HISTORY_PATH = "/sd/psephos_history.txt"
 HISTORY_MAX = 200              # メモリ保持上限 (PSRAM 余裕あるが安全側)
+CONFIG_PATH = "/sd/psephos_config.txt"
+
+# 設定 (起動時に CONFIG_PATH からロード、`theme` 適用時に保存)
+_config = {
+    "theme": "default",
+    "precision": 10,
+    "history_max": HISTORY_MAX,
+}
+
+
+def _load_config():
+    """設定ファイルを読み込み _config に反映。`key = value` 1 行形式。"""
+    try:
+        with open(CONFIG_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if k not in _config:
+                    continue
+                # int 変換できれば数値、ダメなら文字列のまま
+                try:
+                    _config[k] = int(v)
+                except ValueError:
+                    _config[k] = v
+    except OSError:
+        pass
+
+
+def _save_config():
+    """_config を CONFIG_PATH に書き出す。失敗は黙って無視 (SD 無し等)。"""
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            for k, v in _config.items():
+                f.write("{}={}\n".format(k, v))
+    except OSError:
+        pass
 
 
 # ---- 安全な式評価 --------------------------------------------------------
@@ -136,6 +197,9 @@ def _is_identifier(s):
     return True
 
 
+_COMMANDS = ("help", "theme")  # main() で特殊コマンドとして処理する名前
+
+
 def _is_reserved_target(name):
     """代入の左辺として使用禁止の予約名か判定。"""
     if name in _NAMESPACE:
@@ -143,6 +207,8 @@ def _is_reserved_target(name):
     if name == "ans":
         return True
     if name.startswith("ans") and name[3:] and name[3:].isdigit():
+        return True
+    if name in _COMMANDS:
         return True
     return False
 
@@ -365,6 +431,58 @@ def _show():
             pass
 
 
+_HELP_LINES = [
+    "Psephos Help",
+    "============",
+    "",
+    "Trig    sin cos tan asin acos atan atan2",
+    "ExpLog  exp log log10 sqrt pow",
+    "Round   floor ceil fabs abs round",
+    "Angle   radians degrees",
+    "Radix   hex bin oct int float",
+    "Const   pi e tau",
+    "Util    min max",
+    "Ans     ans  ans2..ans10",
+    "Vars    x = 3   (session only, no shadow of builtins)",
+    "Literal 1.5e-10   0xFF   0b101   0o777",
+    "",
+    "Keys",
+    "  Up/Down     history recall / restore",
+    "  Left/Right  cursor move",
+    "  Home/End    line start / end",
+    "  Backspace   delete before cursor",
+    "  Enter       evaluate",
+    "  ESC         quit Psephos",
+    "",
+    "Commands",
+    "  help              this screen",
+    "  theme             list available themes",
+    "  theme <name>      apply theme (default/amber/green/cyan/invert)",
+    "",
+    "Press any key to return...",
+]
+
+
+def _show_help():
+    """全画面ヘルプを表示し、任意キーで戻る。"""
+    if not _HW:
+        for line in _HELP_LINES:
+            print(line)
+        return
+    _clear()
+    for r, line in enumerate(_HELP_LINES):
+        if r >= ROWS:
+            break
+        _draw_text(0, r * CHAR_H, line[:COLS], COL_FG)
+    _show()
+    # 任意キーで戻る (エスケープシーケンス除く)
+    while True:
+        k = _read_key()
+        if isinstance(k, tuple):
+            continue
+        break
+
+
 def render(history, buf, cursor, message=""):
     """履歴域 + 入力行を描画。cursor は buf 内のカーソル位置 (0 〜 len(buf))。"""
     if not _HW:
@@ -425,13 +543,15 @@ def render(history, buf, cursor, message=""):
 # ---- メインループ --------------------------------------------------------
 
 def main():
+    _load_config()
+    _apply_theme(_config.get("theme", "default"))
     history = History()
     buf = ""
     cursor = 0          # buf 内のカーソル位置 (0 〜 len(buf))
     hist_idx = -1       # -1 = 編集中 (履歴閲覧モード外), 0 以上 = history.items のインデックス
     saved_buf = ""      # 履歴閲覧開始時の編集中バッファを退避
     saved_cursor = 0
-    message = "Psephos  ENTER=eval  ESC=quit  Up/Dn=history"
+    message = "Psephos  ENTER=eval  ESC=quit  type 'help' for keys"
     render(history, buf, cursor, message)
 
     def _load_hist(idx):
@@ -497,6 +617,35 @@ def main():
             saved_cursor = 0
             if not expr:
                 continue
+            # --- 特殊コマンド: help / theme ---
+            if expr == "help":
+                _show_help()
+                buf = ""
+                cursor = 0
+                message = ""
+                render(history, buf, cursor, message)
+                continue
+            if expr == "theme":
+                names = " ".join(sorted(_THEMES.keys()))
+                cur = _config.get("theme", "default")
+                message = "Themes: " + names + "  (now: " + cur + ")"
+                buf = ""
+                cursor = 0
+                render(history, buf, cursor, message)
+                continue
+            if expr.startswith("theme "):
+                name = expr[6:].strip()
+                if _apply_theme(name):
+                    _config["theme"] = name
+                    _save_config()
+                    message = "Theme: " + name
+                else:
+                    message = "Unknown theme: " + name
+                buf = ""
+                cursor = 0
+                render(history, buf, cursor, message)
+                continue
+            # --- 通常評価 ---
             try:
                 result = evaluate(expr)
                 res_str = _format(result)
@@ -526,11 +675,12 @@ def main():
 
 
 def _format(value):
-    """結果を見やすい文字列に整形 (整数は小数点を出さない)。"""
+    """結果を見やすい文字列に整形 (整数は小数点を出さない、有効桁は _config['precision'])。"""
     if isinstance(value, float):
         if value == int(value) and abs(value) < 1e15:
             return str(int(value))
-        return "{:.10g}".format(value)
+        p = _config.get("precision", 10)
+        return ("{:." + str(p) + "g}").format(value)
     return str(value)
 
 
