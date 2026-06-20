@@ -33,8 +33,15 @@ CHAR_W = 6
 CHAR_H = 8
 COLS = SCREEN_W // CHAR_W      # 53
 ROWS = SCREEN_H // CHAR_H      # 40
-INPUT_ROW = ROWS - 1
-HISTORY_ROWS = ROWS - 2        # 最下行=入力, その上1行=区切り
+
+# レイアウト (chrome 画像非装着時の既定値 = 全画面利用)
+# chrome.bin がある場合は _maybe_load_chrome() がこれらを書き換える。
+_ACTIVE_TOP = 0                              # 動的領域開始 y (px)
+_ACTIVE_BOTTOM = SCREEN_H                    # 動的領域終了 y (px, exclusive)
+_HISTORY_Y0 = 0                              # 履歴域開始 y (px)
+_HISTORY_ROWS = ROWS - 2                     # 履歴域行数 (CHAR_H 単位)
+_MESSAGE_Y = (ROWS - 2) * CHAR_H             # メッセージ行 y (px)
+_INPUT_Y = (ROWS - 1) * CHAR_H               # 入力行 y (px)
 
 # 4bit LUT 上の論理色 (VT100 LUT 既定: 0=黒, 1=赤, 2=緑, 3=黄, 4=青,
 # 5=マゼンタ, 6=シアン, 7=明灰, 8=暗灰, 9〜15=各色の明るい版・白)
@@ -66,6 +73,13 @@ def _apply_theme(name):
 HISTORY_PATH = "/sd/psephos_history.txt"
 HISTORY_MAX = 200              # メモリ保持上限 (PSRAM 余裕あるが安全側)
 CONFIG_PATH = "/sd/psephos_config.txt"
+
+# Chrome レイヤ (アプリ枠) 関連
+CHROME_IMG_PATH = "/sd/psephos_chrome.bin"
+CHROME_BYTES = (SCREEN_W * SCREEN_H) // 2    # GS4_HMSB: 4bpp = 51,200 byte
+CHROME_TOP_DEFAULT_H = 16                    # chrome 上部の高さ (px)
+CHROME_BOTTOM_DEFAULT_H = 8                  # chrome 下部の高さ (px)
+_chrome_buf = None                           # (bytearray, FrameBuffer) or None
 
 # 設定 (起動時に CONFIG_PATH からロード、`theme` 適用時に保存)
 _config = {
@@ -431,6 +445,57 @@ def _show():
             pass
 
 
+def _maybe_load_chrome():
+    """`CHROME_IMG_PATH` が存在すれば chrome 画像を読み込みレイアウトを再計算。
+    存在しない場合は何もしない（全画面動作のまま）。"""
+    global _chrome_buf
+    global _ACTIVE_TOP, _ACTIVE_BOTTOM, _HISTORY_Y0, _HISTORY_ROWS, _MESSAGE_Y, _INPUT_Y
+    if not _HW:
+        return
+    try:
+        import framebuf
+    except ImportError:
+        return
+    buf = bytearray(CHROME_BYTES)
+    try:
+        with open(CHROME_IMG_PATH, "rb") as f:
+            n = f.readinto(buf)
+        if n != CHROME_BYTES:
+            return
+    except OSError:
+        return
+    _chrome_buf = (buf, framebuf.FrameBuffer(buf, SCREEN_W, SCREEN_H, framebuf.GS4_HMSB))
+    # レイアウトを chrome 対応値に更新
+    _ACTIVE_TOP = CHROME_TOP_DEFAULT_H
+    _ACTIVE_BOTTOM = SCREEN_H - CHROME_BOTTOM_DEFAULT_H
+    _HISTORY_Y0 = _ACTIVE_TOP
+    active_rows = (_ACTIVE_BOTTOM - _ACTIVE_TOP) // CHAR_H
+    _HISTORY_ROWS = active_rows - 2          # 末尾 2 行をメッセージと入力に
+    _INPUT_Y = _ACTIVE_BOTTOM - CHAR_H
+    _MESSAGE_Y = _INPUT_Y - CHAR_H
+
+
+def _redraw_chrome():
+    """Chrome 画像を blit (theme 変更後・help 終了後の復元に使う)。"""
+    if _chrome_buf is None or not _HW:
+        return
+    palette = _build_help_palette()
+    try:
+        _display.blit(_chrome_buf[1], 0, 0, -1, palette)
+    except TypeError:
+        _display.blit(_chrome_buf[1], 0, 0)
+
+
+def _clear_active():
+    """動的領域のみクリア。chrome 未装着時は全画面クリアと等価。"""
+    if not _HW:
+        return
+    if _chrome_buf is None:
+        _display.fill(COL_BG)
+    else:
+        _display.fill_rect(0, _ACTIVE_TOP, SCREEN_W, _ACTIVE_BOTTOM - _ACTIVE_TOP, COL_BG)
+
+
 _HELP_LINES = [
     "Psephos Help",
     "============",
@@ -574,11 +639,12 @@ def render(history, buf, cursor, message=""):
         print("> " + shown + ("   [" + message + "]" if message else ""))
         return
 
-    _clear()
+    # 動的領域のみクリア (chrome 装着時は chrome を消さない)
+    _clear_active()
+
     # --- 履歴域 (古い順に上から、最新が下に来るよう末尾を表示) ---
-    visible = history.items[-HISTORY_ROWS:]
-    row = 0
-    for expr, res in visible:
+    visible = history.items[-_HISTORY_ROWS:]
+    for row, (expr, res) in enumerate(visible):
         # 代入式 `x = 5` で結果も `5` のとき "x = 5 = 5" になるのを抑制
         if expr.endswith(" = " + res) or expr.endswith("=" + res):
             line = expr
@@ -586,37 +652,34 @@ def render(history, buf, cursor, message=""):
             line = "{} = {}".format(expr, res)
         if len(line) > COLS:
             line = line[:COLS - 1] + "~"
-        _draw_text(0, row * CHAR_H, line, COL_DIM)
-        row += 1
+        _draw_text(0, _HISTORY_Y0 + row * CHAR_H, line, COL_DIM)
 
-    # --- 区切り線 ---
-    sep_y = (ROWS - 2) * CHAR_H
+    # --- 区切り線 (メッセージ行と同じ y) ---
     if hasattr(_display, "hline"):
-        _display.hline(0, sep_y, SCREEN_W, COL_DIM)
+        _display.hline(0, _MESSAGE_Y, SCREEN_W, COL_DIM)
 
     # --- 入力行 (長い場合はカーソル位置が見える形で末尾寄せ) ---
     prefix = "> "
     full = prefix + buf
-    # 描画開始位置に対する buf 側の表示オフセット (左へ何文字スクロールしたか)
     shift = 0
     if len(full) > COLS:
         shift = len(full) - COLS
         prompt = full[shift:]
     else:
         prompt = full
-    _draw_text(0, INPUT_ROW * CHAR_H, prompt, COL_FG)
+    _draw_text(0, _INPUT_Y, prompt, COL_FG)
 
     # --- カーソル下線 (アクセント色) ---
     cx_chars = len(prefix) + cursor - shift
     if 0 <= cx_chars < COLS and hasattr(_display, "fill_rect"):
         cx = cx_chars * CHAR_W
-        cy = INPUT_ROW * CHAR_H + CHAR_H - 1
+        cy = _INPUT_Y + CHAR_H - 1
         _display.fill_rect(cx, cy, CHAR_W, 1, COL_ACC)
 
     # --- メッセージ (エラー等) を入力行の 1 行上に表示 ---
     if message:
         msg = message[:COLS]
-        _draw_text(0, (ROWS - 2) * CHAR_H, msg, COL_ACC)
+        _draw_text(0, _MESSAGE_Y, msg, COL_ACC)
 
     _show()
 
@@ -626,6 +689,8 @@ def render(history, buf, cursor, message=""):
 def main():
     _load_config()
     _apply_theme(_config.get("theme", "default"))
+    _maybe_load_chrome()           # chrome.bin があればレイアウトを更新 + 起動時に blit
+    _redraw_chrome()
     history = History()
     buf = ""
     cursor = 0          # buf 内のカーソル位置 (0 〜 len(buf))
@@ -701,6 +766,7 @@ def main():
             # --- 特殊コマンド: help / theme ---
             if expr == "help":
                 _show_help()
+                _redraw_chrome()         # ヘルプ画面が画面全体を覆っていたので chrome を復元
                 buf = ""
                 cursor = 0
                 message = ""
@@ -719,6 +785,7 @@ def main():
                 if _apply_theme(name):
                     _config["theme"] = name
                     _save_config()
+                    _redraw_chrome()     # 新パレットで chrome を再描画
                     message = "Theme: " + name
                 else:
                     message = "Unknown theme: " + name
