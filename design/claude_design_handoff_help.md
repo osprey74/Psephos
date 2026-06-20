@@ -145,6 +145,7 @@ invert テーマ:    BG=白 / FG=黒    / DIM=暗灰 / ACC=暗赤
 | `help` + Enter | このヘルプ画面 |
 | `theme` + Enter | テーマ一覧表示 |
 | `theme <名前>` + Enter | テーマ適用 |
+| `clear` + Enter | 履歴を消去（y/n 確認プロンプト → y で実行、n / ESC でキャンセル） |
 
 テーマ一覧: `default` / `amber` / `green` / `cyan` / `invert`
 
