@@ -36,12 +36,26 @@ ROWS = SCREEN_H // CHAR_H      # 40
 
 # レイアウト (chrome 画像非装着時の既定値 = 全画面利用)
 # chrome.bin がある場合は _maybe_load_chrome() がこれらを書き換える。
+HISTORY_LEFT_PX = 2 * CHAR_W                 # 履歴の左余白 (px) = 2 文字分
+HISTORY_COLS = COLS - 3                      # 左 2 + 右 1 文字分の余白を引いた表示可能列数
+# 入力行は `_draw_text_2x()` で 2 倍描画する。framebuf.text の組み込みフォントは 8x8
+# (PicoCalc の drawTxt6x8 とは別物) なので、ベースを 8x8 として計算する。
+INPUT_SCALE = 2                              # 入力行の拡大率
+INPUT_BASE_W = 8                             # framebuf.text の組み込みフォント幅
+INPUT_BASE_H = 8                             # framebuf.text の組み込みフォント高
+INPUT_CHAR_W = INPUT_BASE_W * INPUT_SCALE    # 16 px / char
+INPUT_CHAR_H = INPUT_BASE_H * INPUT_SCALE    # 16 px / char
+INPUT_COLS = SCREEN_W // INPUT_CHAR_W        # 320 / 16 = 20 cols
+
+INPUT_TOP_PAD = 3                            # 入力行とメッセージ行の間の余白 (px, 区切り線 + 上下 1px ずつ)
+INPUT_BOTTOM_PAD = 6                         # 入力行と chrome 下端の間の余白 (px)
+
 _ACTIVE_TOP = 0                              # 動的領域開始 y (px)
 _ACTIVE_BOTTOM = SCREEN_H                    # 動的領域終了 y (px, exclusive)
 _HISTORY_Y0 = 0                              # 履歴域開始 y (px)
-_HISTORY_ROWS = ROWS - 2                     # 履歴域行数 (CHAR_H 単位)
-_MESSAGE_Y = (ROWS - 2) * CHAR_H             # メッセージ行 y (px)
-_INPUT_Y = (ROWS - 1) * CHAR_H               # 入力行 y (px)
+_INPUT_Y = SCREEN_H - INPUT_CHAR_H - INPUT_BOTTOM_PAD    # 入力行 y (下余白を考慮)
+_MESSAGE_Y = _INPUT_Y - INPUT_TOP_PAD - CHAR_H           # メッセージ行 y (px)
+_HISTORY_ROWS = (_MESSAGE_Y - _HISTORY_Y0) // CHAR_H     # 履歴行数 (動的に算出)
 
 # 4bit LUT 上の論理色 (VT100 LUT 既定: 0=黒, 1=赤, 2=緑, 3=黄, 4=青,
 # 5=マゼンタ, 6=シアン, 7=明灰, 8=暗灰, 9〜15=各色の明るい版・白)
@@ -432,6 +446,43 @@ def _draw_text(x, y, s, color=COL_FG):
         pass  # PC フォールバックでは描画しない
 
 
+def _draw_text_2x(x, y, s, color=COL_FG):
+    """framebuf 組み込み 8x8 フォントを 2 倍に拡大して「ノーマル太さ」で描画。
+
+    一時 MONO_HMSB バッファに 1x で描き、各セットピクセルを 2x 座標に 1x1 ドットで
+    スタンプ + 右隣・下隣・右下隣が set なら接続ピクセルを補う。これにより文字は
+    16x16 のサイズ感だが線の太さは 1px のままになる (2x2 ブロック塗りつぶしと
+    比較して bold 感がなくなる)。
+    """
+    if not _HW or not s:
+        return
+    import framebuf
+    str_w_px = len(s) * INPUT_BASE_W                 # 8 px / char
+    pad_w = ((str_w_px + 7) // 8) * 8                # 8 の倍数に切り上げ
+    buf = bytearray((pad_w * INPUT_BASE_H) // 8)
+    tmp = framebuf.FrameBuffer(buf, pad_w, INPUT_BASE_H, framebuf.MONO_HMSB)
+    tmp.fill(0)
+    tmp.text(s, 0, 0, 1)
+    for py in range(INPUT_BASE_H):
+        for px in range(str_w_px):
+            if not tmp.pixel(px, py):
+                continue
+            dx = x + px * INPUT_SCALE
+            dy = y + py * INPUT_SCALE
+            _display.pixel(dx, dy, color)
+            # 隣接 set ピクセルとの間を 1 px の橋渡しで繋ぐ (線が途切れないように)
+            right_set = (px + 1 < str_w_px) and tmp.pixel(px + 1, py)
+            down_set = (py + 1 < INPUT_BASE_H) and tmp.pixel(px, py + 1)
+            if right_set:
+                _display.pixel(dx + 1, dy, color)
+            if down_set:
+                _display.pixel(dx, dy + 1, color)
+            # 斜め接続 (右下が set で右・下が両方とも未 set の場合のみ)
+            if (px + 1 < str_w_px and py + 1 < INPUT_BASE_H and
+                    tmp.pixel(px + 1, py + 1) and not right_set and not down_set):
+                _display.pixel(dx + 1, dy + 1, color)
+
+
 def _clear():
     if _HW:
         _display.fill(COL_BG)
@@ -469,10 +520,9 @@ def _maybe_load_chrome():
     _ACTIVE_TOP = CHROME_TOP_DEFAULT_H
     _ACTIVE_BOTTOM = SCREEN_H - CHROME_BOTTOM_DEFAULT_H
     _HISTORY_Y0 = _ACTIVE_TOP
-    active_rows = (_ACTIVE_BOTTOM - _ACTIVE_TOP) // CHAR_H
-    _HISTORY_ROWS = active_rows - 2          # 末尾 2 行をメッセージと入力に
-    _INPUT_Y = _ACTIVE_BOTTOM - CHAR_H
-    _MESSAGE_Y = _INPUT_Y - CHAR_H
+    _INPUT_Y = _ACTIVE_BOTTOM - INPUT_CHAR_H - INPUT_BOTTOM_PAD   # 入力下余白を確保
+    _MESSAGE_Y = _INPUT_Y - INPUT_TOP_PAD - CHAR_H                # 入力上余白も確保
+    _HISTORY_ROWS = (_MESSAGE_Y - _HISTORY_Y0) // CHAR_H          # 動的算出
 
 
 def _redraw_chrome():
@@ -554,41 +604,25 @@ def _build_help_palette():
     return framebuf.FrameBuffer(pal, 16, 1, framebuf.GS4_HMSB)
 
 
-def _load_help_pages():
-    """SD から全ヘルプページの GS4 バイナリを読み込んで FrameBuffer のリストを返す。
-    全ページが読めない場合は None。"""
-    try:
-        import framebuf
-    except ImportError:
-        return None
-    pages = []
+def _check_help_pages():
+    """全ヘルプページファイルの存在を確認。問題なければ True。"""
     for path in HELP_PAGE_PATHS:
-        buf = bytearray(HELP_PAGE_BYTES)
         try:
             with open(path, "rb") as f:
-                n = f.readinto(buf)
-            if n != HELP_PAGE_BYTES:
-                return None
+                pass
         except OSError:
-            return None
-        pages.append((buf, framebuf.FrameBuffer(buf, SCREEN_W, SCREEN_H, framebuf.GS4_HMSB)))
-    return pages
+            return False
+    return True
 
 
 def _show_help():
-    """ヘルプ画面を表示し、任意キーで戻る。
-
-    GS4 画像ファイル (HELP_PAGE_PATHS) がすべて揃っていればセマンティック 4 色画像を
-    現在のテーマカラーパレット経由で blit する。← / → でページ送り、それ以外のキーで戻る。
-    画像が無ければ内蔵テキストヘルプ (_HELP_LINES) を 6x8 フォントで描画する。
-    """
+    """ヘルプ画面を表示し、任意キーで戻る (1 ページずつロードで省メモリ)。"""
     if not _HW:
         for line in _HELP_LINES:
             print(line)
         return
 
-    pages = _load_help_pages()
-    if pages is None:
+    if not _check_help_pages():
         # フォールバック: テキストヘルプ (6x8 ASCII)
         _clear()
         for r, line in enumerate(_HELP_LINES):
@@ -603,13 +637,29 @@ def _show_help():
             break
         return
 
+    import framebuf
+    try:
+        import gc
+        gc.collect()
+    except ImportError:
+        pass
     palette = _build_help_palette()
+    page_buf = bytearray(HELP_PAGE_BYTES)               # 1 ページぶんのみ常駐
+    page_fb = framebuf.FrameBuffer(page_buf, SCREEN_W, SCREEN_H, framebuf.GS4_HMSB)
     idx = 0
-    n_pages = len(pages)
+    n_pages = len(HELP_PAGE_PATHS)
 
     def _draw():
+        try:
+            with open(HELP_PAGE_PATHS[idx], "rb") as f:
+                f.readinto(page_buf)
+        except OSError:
+            return
         _clear()
-        _display.blit(pages[idx][1], 0, 0, -1, palette)
+        try:
+            _display.blit(page_fb, 0, 0, -1, palette)
+        except TypeError:
+            _display.blit(page_fb, 0, 0)
         _show()
 
     _draw()
@@ -623,7 +673,6 @@ def _show_help():
             elif seq == b"[D" and idx > 0:
                 idx -= 1
                 _draw()
-            # 端でのカーソル無視、他のエスケープシーケンスは無視
             continue
         # 通常キー (ESC 含む) で戻る
         break
@@ -642,7 +691,7 @@ def render(history, buf, cursor, message=""):
     # 動的領域のみクリア (chrome 装着時は chrome を消さない)
     _clear_active()
 
-    # --- 履歴域 (古い順に上から、最新が下に来るよう末尾を表示) ---
+    # --- 履歴域 (古い順に上から、最新が下に来るよう末尾を表示。左に 2 文字分の余白) ---
     visible = history.items[-_HISTORY_ROWS:]
     for row, (expr, res) in enumerate(visible):
         # 代入式 `x = 5` で結果も `5` のとき "x = 5 = 5" になるのを抑制
@@ -650,31 +699,30 @@ def render(history, buf, cursor, message=""):
             line = expr
         else:
             line = "{} = {}".format(expr, res)
-        if len(line) > COLS:
-            line = line[:COLS - 1] + "~"
-        _draw_text(0, _HISTORY_Y0 + row * CHAR_H, line, COL_DIM)
+        if len(line) > HISTORY_COLS:
+            line = line[:HISTORY_COLS - 1] + "~"
+        _draw_text(HISTORY_LEFT_PX, _HISTORY_Y0 + row * CHAR_H, line, COL_DIM)
 
-    # --- 区切り線 (メッセージ行と同じ y) ---
+    # --- 区切り線 (入力行の上 2 px、メッセージ文字とも入力文字とも被らない位置) ---
     if hasattr(_display, "hline"):
-        _display.hline(0, _MESSAGE_Y, SCREEN_W, COL_DIM)
+        _display.hline(0, _INPUT_Y - 2, SCREEN_W, COL_DIM)
 
-    # --- 入力行 (長い場合はカーソル位置が見える形で末尾寄せ) ---
+    # --- 入力行 (2x スケール、カーソル位置を見せるためのスクロール) ---
+    # 画面端から 1 文字分のマージンを確保 (INPUT_COLS - 1 列が実効表示幅)
     prefix = "> "
     full = prefix + buf
-    shift = 0
-    if len(full) > COLS:
-        shift = len(full) - COLS
-        prompt = full[shift:]
-    else:
-        prompt = full
-    _draw_text(0, _INPUT_Y, prompt, COL_FG)
+    visible_cols = INPUT_COLS - 1                    # 19 cols 実効幅
+    # カーソルが visible 範囲に収まるようシフト量を決定。カーソル論理列 = len(prefix)+cursor
+    shift = max(0, len(prefix) + cursor - (visible_cols - 1))
+    prompt = full[shift:shift + visible_cols]
+    _draw_text_2x(0, _INPUT_Y, prompt, COL_FG)
 
-    # --- カーソル下線 (アクセント色) ---
+    # --- カーソル下線 (アクセント色、2x スケールに合わせて 16 px 幅・下端 2 px) ---
     cx_chars = len(prefix) + cursor - shift
-    if 0 <= cx_chars < COLS and hasattr(_display, "fill_rect"):
-        cx = cx_chars * CHAR_W
-        cy = _INPUT_Y + CHAR_H - 1
-        _display.fill_rect(cx, cy, CHAR_W, 1, COL_ACC)
+    if 0 <= cx_chars < visible_cols and hasattr(_display, "fill_rect"):
+        cx = cx_chars * INPUT_CHAR_W
+        cy = _INPUT_Y + INPUT_CHAR_H - 2
+        _display.fill_rect(cx, cy, INPUT_CHAR_W, 2, COL_ACC)
 
     # --- メッセージ (エラー等) を入力行の 1 行上に表示 ---
     if message:
@@ -769,7 +817,7 @@ def main():
                 _redraw_chrome()         # ヘルプ画面が画面全体を覆っていたので chrome を復元
                 buf = ""
                 cursor = 0
-                message = ""
+                # message は維持 (ヘルプ前の状態を画面に残す)
                 render(history, buf, cursor, message)
                 continue
             if expr == "theme":
