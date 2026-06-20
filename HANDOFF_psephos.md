@@ -1,4 +1,4 @@
-# HANDOFF_psephos.md — Psephos（関数電卓 for PicoCalc）
+# HANDOFF_psephos.md — Psephos（プログラマブル関数電卓 for PicoCalc）
 
 > Claude Code 向けハンドオフ。`DESIGN.md` と `psephos.py`（MVP プロトタイプ）を前提とする。
 > 名称確定: **Psephos**（ψῆφος = 計算に用いた小石）。

@@ -1,4 +1,4 @@
-# psephos.py -- 関数電卓 (PicoCalc / Raspberry Pi Pico 2W / MicroPython)
+# psephos.py -- プログラマブル関数電卓 (PicoCalc / Raspberry Pi Pico 2W / MicroPython)
 #
 # 命名: Psephos (ψῆφος = 計算に用いた小石) -- 仮称。一括置換で変更可。
 # 依存: LofiFren/zenodante 系 PicoCalc MicroPython ファームウェア

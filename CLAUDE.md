@@ -1,10 +1,10 @@
 # Psephos
 
-> PicoCalc 向け関数電卓。ψῆφος（psephos = 計算に用いた小石）に由来。
+> PicoCalc 向けプログラマブル関数電卓。ψῆφος（psephos = 計算に用いた小石）に由来。
 
 ## プロジェクト概要
 
-ClockworkPi PicoCalc + Raspberry Pi Pico 2W で動作する MicroPython 製の関数電卓。Python 形式の数式（`sin(pi/6)+sqrt(2)` 等）を物理 QWERTY で直接入力し、結果と履歴を画面に積み、SD カード（`/sd/psephos_history.txt`）へ永続化する。
+ClockworkPi PicoCalc + Raspberry Pi Pico 2W で動作する MicroPython 製のプログラマブル関数電卓。Python 形式の数式（`sin(pi/6)+sqrt(2)` 等）を物理 QWERTY で直接入力し、結果と履歴を画面に積み、SD カード（`/sd/psephos_history.txt`）へ永続化する。
 
 詳細仕様は [DESIGN.md](DESIGN.md)、実装ハンドオフは [HANDOFF_psephos.md](HANDOFF_psephos.md) を参照。両者が一次情報。
 

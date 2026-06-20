@@ -1,6 +1,6 @@
-# DESIGN.md — Psephos（関数電卓 for PicoCalc）
+# DESIGN.md — Psephos（プログラマブル関数電卓 for PicoCalc）
 
-> 計算に用いた小石（ψῆφος / psephos）に由来する、PicoCalc 向け関数電卓。
+> 計算に用いた小石（ψῆφος / psephos）に由来する、PicoCalc 向けプログラマブル関数電卓。
 > 名称確定: **Psephos**（2026-06-18）。
 
 - **対象ハード**: ClockworkPi PicoCalc + Raspberry Pi Pico 2W（RP2350）

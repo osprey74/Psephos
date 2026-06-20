@@ -1,6 +1,6 @@
 # Psephos
 
-> A scientific calculator for ClockworkPi PicoCalc, named after **ψῆφος** (psephos) — the small pebbles used for counting in ancient Greece.
+> A programmable scientific calculator for ClockworkPi PicoCalc, named after **ψῆφος** (psephos) — the small pebbles used for counting in ancient Greece.
 
 [日本語版はこちら / Japanese README](README.ja.md)
 

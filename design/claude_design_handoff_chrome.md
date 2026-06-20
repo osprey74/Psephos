@@ -1,6 +1,6 @@
 # Psephos アプリ枠（chrome）デザイン — Claude Design 向け Handoff
 
-> このドキュメントを **claude.ai/design** に渡し、Psephos（ClockworkPi PicoCalc 向け関数電卓）の **画面装飾レイヤ（chrome）** をデザインしてもらうための指示書です。
+> このドキュメントを **claude.ai/design** に渡し、Psephos（ClockworkPi PicoCalc 向けプログラマブル関数電卓）の **画面装飾レイヤ（chrome）** をデザインしてもらうための指示書です。
 >
 > ヘルプ画面の Handoff（[claude_design_handoff_help.md](claude_design_handoff_help.md)）と同じ「セマンティック 4 色」設計思想を踏襲します。
 
@@ -47,7 +47,7 @@
 ```
 ┌─────────────────────────────────────┐ y=0
 │   chrome 上部 (16 px / 2 行)        │
-│   ヘッダー: PSEPHOS - 関数電卓        │
+│   ヘッダー: PSEPHOS - Programmable scientific calculator │
 ├─────────────────────────────────────┤ y=16
 │                                       │
 │                                       │
@@ -77,11 +77,11 @@
 
 ### 必須
 
-- **アプリ名: `PSEPHOS - 関数電卓`**
+- **アプリ名: `PSEPHOS - Programmable scientific calculator`**
   - ASCII 部分（`PSEPHOS`）は ACC 色でロゴ的に強調
-  - `- 関数電卓` 部分は FG または DIM で説明的に
-  - 全体で 16 px 高さに収まる Sans Serif 系（日本語部分は Noto Sans JP 推奨）
-  - 推奨フォントサイズ: 12-14 px
+  - `- Programmable scientific calculator` 部分は FG または DIM で説明的に
+  - 全体で 16 px 高さに収まる Sans Serif 系（英文なので Consolas / Inconsolata 等のモノスペースも可）
+  - 推奨フォントサイズ: 10-12 px（英文を 1 行に収めるためやや小さめ）
 
 ### 推奨される追加要素（任意）
 
@@ -184,7 +184,7 @@
 - [ ] サイズ 320 × 320 px ちょうど
 - [ ] 使用色が §3 の 4 色のみ
 - [ ] 中央の **y=16〜311 が完全に黒（BG）で塗りつぶされている**
-- [ ] 上部 16 px に `PSEPHOS - 関数電卓` が読める形で配置
+- [ ] 上部 16 px に `PSEPHOS - Programmable scientific calculator` が読める形で配置
 - [ ] 下部 8 px に何らかのステータス表示がある
 - [ ] アンチエイリアス OFF
 - [ ] レトロ CRT ターミナルの世界観が表現されている

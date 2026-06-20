@@ -1,6 +1,6 @@
 # Psephos ヘルプ画面 — Claude Design 向け Handoff
 
-> このドキュメントを **claude.ai/design** に渡し、Psephos（ClockworkPi PicoCalc 向け関数電卓）のヘルプ画面 2 ページ分のデザインを生成してもらうための指示書です。
+> このドキュメントを **claude.ai/design** に渡し、Psephos（ClockworkPi PicoCalc 向けプログラマブル関数電卓）のヘルプ画面 2 ページ分のデザインを生成してもらうための指示書です。
 
 ---
 
@@ -84,7 +84,7 @@ invert テーマ:    BG=白 / FG=黒    / DIM=暗灰 / ACC=暗赤
 
 ## 5. ページ 1 に載せる内容
 
-タイトル: **`Psephos -- 関数電卓 ヘルプ (1/2)`**
+タイトル: **`Psephos -- プログラマブル関数電卓 ヘルプ (1/2)`**
 
 ### 関数カテゴリ
 
@@ -125,7 +125,7 @@ invert テーマ:    BG=白 / FG=黒    / DIM=暗灰 / ACC=暗赤
 
 ## 6. ページ 2 に載せる内容
 
-タイトル: **`Psephos -- 関数電卓 ヘルプ (2/2)`**
+タイトル: **`Psephos -- プログラマブル関数電卓 ヘルプ (2/2)`**
 
 ### キー操作
 

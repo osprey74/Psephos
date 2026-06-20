@@ -1,6 +1,6 @@
 # Psephos
 
-> ClockworkPi PicoCalc 向け関数電卓。名称はギリシャ語の **ψῆφος**（psephos = 計算に用いた小石）に由来します。
+> ClockworkPi PicoCalc 向けプログラマブル関数電卓。名称はギリシャ語の **ψῆφος**（psephos = 計算に用いた小石）に由来します。
 
 [English README](README.md)
 
