@@ -120,14 +120,21 @@ LofiFren / zenodante の実機 `picocalc.py` を読み、以下を**事実とし
 
 ### Phase 4 — 仕上げ — ✅ 完了 (2026-06-18 実機検証)
 - [x] 関数一覧ヘルプ画面（`help` + Enter で全画面表示、任意キーで戻る）
-- [x] **日本語ヘルプ画像対応**（`tools/gen_help_image.py` で `assets/help_ja.bin` を生成 → SD `/sd/psephos_help.bin` に配置、`_show_help` が画像を blit。画像が無ければ ASCII テキストヘルプにフォールバック）
+- [x] **日本語ヘルプ画像対応（4 色セマンティック・2 ページ切替）**:
+  - Claude Design で PNG 作成 → `tools/convert_help_png.py` で GS4_HMSB バイナリに変換 → SD `/sd/psephos_help_p1.bin` `_p2.bin` に配置
+  - `_show_help()` が GS4 画像を 16 エントリのテーマカラーパレット経由で blit → テーマ切替に自動追随
+  - 左右矢印キーでページ送り、他キーで戻る
+  - 画像が無ければ ASCII テキストヘルプ（`_HELP_LINES`）にフォールバック
 - [x] テーマ切替（`theme` で一覧、`theme <name>` で適用、5 種類: default/amber/green/cyan/invert）
 - [x] 設定ファイル `/sd/psephos_config.txt`（theme/precision/history_max を永続化、起動時自動ロード）
 - [ ] 履歴ファイルのローテーション（肥大化対策、Phase 5 候補に送り）
 
 > 補足 1: LofiFren ファームウェアは `switchPredefinedLUT` API を提供せず、C ドライバ内に LUT が固定で焼き込まれている。標準 VT100 16 色パレットなので、`COL_FG/BG/DIM/ACC` のスロット番号を入れ替えるだけでテーマを実現した（C 側変更不要）。
 >
-> 補足 2: 実機 framebuf.MONO_HMSB は **公式 docs と挙動が異なり実質 LSB-first** だった（実機検証 2026-06-18）。Pillow の MSB-first 出力をそのまま blit すると 8 ピクセル毎にバイト内が反転して読めなくなる。`gen_help_image.py` は出力時にビット反転テーブル `translate()` を適用して対処。
+> 補足 2: 実機 framebuf のニブル/ビット順は format ごとに挙動が異なる（実機検証 2026-06-18）。
+>
+> - `MONO_HMSB`: **公式 docs と異なり LSB-first** 動作。1bit 画像を blit する場合は出力側でビット反転が必須（旧 MONO 版で確認、現在は廃止）。
+> - `GS4_HMSB`: **仕様通り high nibble first** で動作。`tools/convert_help_png.py` は標準の packing で正しく blit される。
 
 ---
 

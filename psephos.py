@@ -463,64 +463,104 @@ _HELP_LINES = [
 ]
 
 
-HELP_IMG_PATH = "/sd/psephos_help.bin"
-HELP_IMG_BYTES = (SCREEN_W * SCREEN_H) // 8   # MONO_HMSB: 12,800 byte
+HELP_PAGE_PATHS = ("/sd/psephos_help_p1.bin", "/sd/psephos_help_p2.bin")
+HELP_PAGE_BYTES = (SCREEN_W * SCREEN_H) // 2   # GS4_HMSB: 4bpp = 51,200 byte
 
 
-def _draw_help_image():
-    """日本語ヘルプ画像を blit。成功なら True、ファイル無し等で失敗なら False。"""
+def _build_help_palette():
+    """16 エントリのテーマカラーパレットを GS4_HMSB FrameBuffer として構築。
+
+    画像のピクセル値 (セマンティック index) -> 実テーマ色 のマッピング:
+        0 -> COL_BG  (背景)
+        1 -> COL_FG  (本文)
+        2 -> COL_DIM (補足)
+        3 -> COL_ACC (見出し)
+        4..15 -> COL_FG (フォールバック、本来未使用)
+
+    GS4_HMSB packing: 1 byte = 2 pixel, high nibble = 偶数 index, low nibble = 奇数 index。
+    """
+    import framebuf
+    pal = bytearray(8)
+    pal[0] = (COL_BG << 4) | (COL_FG & 0x0F)    # px 0, 1
+    pal[1] = (COL_DIM << 4) | (COL_ACC & 0x0F)  # px 2, 3
+    fb = (COL_FG << 4) | (COL_FG & 0x0F)
+    for i in range(2, 8):
+        pal[i] = fb                              # px 4..15 fallback
+    return framebuf.FrameBuffer(pal, 16, 1, framebuf.GS4_HMSB)
+
+
+def _load_help_pages():
+    """SD から全ヘルプページの GS4 バイナリを読み込んで FrameBuffer のリストを返す。
+    全ページが読めない場合は None。"""
     try:
         import framebuf
     except ImportError:
-        return False
-    buf = bytearray(HELP_IMG_BYTES)
-    try:
-        with open(HELP_IMG_PATH, "rb") as f:
-            n = f.readinto(buf)
-        if n != HELP_IMG_BYTES:
-            return False
-    except OSError:
-        return False
-    src = framebuf.FrameBuffer(buf, SCREEN_W, SCREEN_H, framebuf.MONO_HMSB)
-    # 1bit -> 4bit のパレット (GS4_HMSB は高ニブル先頭)
-    pal_buf = bytearray(1)
-    pal_buf[0] = (COL_BG << 4) | (COL_FG & 0x0F)
-    palette = framebuf.FrameBuffer(pal_buf, 2, 1, framebuf.GS4_HMSB)
-    _clear()
-    try:
-        _display.blit(src, 0, 0, -1, palette)
-    except TypeError:
-        # palette 引数非対応ビルド向けフォールバック (パレット無し blit)
-        _display.blit(src, 0, 0)
-    _show()
-    return True
+        return None
+    pages = []
+    for path in HELP_PAGE_PATHS:
+        buf = bytearray(HELP_PAGE_BYTES)
+        try:
+            with open(path, "rb") as f:
+                n = f.readinto(buf)
+            if n != HELP_PAGE_BYTES:
+                return None
+        except OSError:
+            return None
+        pages.append((buf, framebuf.FrameBuffer(buf, SCREEN_W, SCREEN_H, framebuf.GS4_HMSB)))
+    return pages
 
 
 def _show_help():
-    """全画面ヘルプを表示し、任意キーで戻る。
+    """ヘルプ画面を表示し、任意キーで戻る。
 
-    画像ファイル (/sd/psephos_help.bin) があれば日本語ヘルプ画像を表示、
-    なければ内蔵テキストヘルプ (_HELP_LINES) を 6x8 フォントで描画する。
+    GS4 画像ファイル (HELP_PAGE_PATHS) がすべて揃っていればセマンティック 4 色画像を
+    現在のテーマカラーパレット経由で blit する。← / → でページ送り、それ以外のキーで戻る。
+    画像が無ければ内蔵テキストヘルプ (_HELP_LINES) を 6x8 フォントで描画する。
     """
     if not _HW:
         for line in _HELP_LINES:
             print(line)
         return
 
-    if not _draw_help_image():
-        # フォールバック: テキストヘルプ
+    pages = _load_help_pages()
+    if pages is None:
+        # フォールバック: テキストヘルプ (6x8 ASCII)
         _clear()
         for r, line in enumerate(_HELP_LINES):
             if r >= ROWS:
                 break
             _draw_text(0, r * CHAR_H, line[:COLS], COL_FG)
         _show()
+        while True:
+            k = _read_key()
+            if isinstance(k, tuple):
+                continue
+            break
+        return
 
-    # 任意キーで戻る (エスケープシーケンス除く)
+    palette = _build_help_palette()
+    idx = 0
+    n_pages = len(pages)
+
+    def _draw():
+        _clear()
+        _display.blit(pages[idx][1], 0, 0, -1, palette)
+        _show()
+
+    _draw()
     while True:
         k = _read_key()
-        if isinstance(k, tuple):
+        if isinstance(k, tuple) and k[0] == "ESCSEQ":
+            seq = k[1]
+            if seq == b"[C" and idx < n_pages - 1:
+                idx += 1
+                _draw()
+            elif seq == b"[D" and idx > 0:
+                idx -= 1
+                _draw()
+            # 端でのカーソル無視、他のエスケープシーケンスは無視
             continue
+        # 通常キー (ESC 含む) で戻る
         break
 
 
