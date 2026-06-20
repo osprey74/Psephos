@@ -463,18 +463,59 @@ _HELP_LINES = [
 ]
 
 
+HELP_IMG_PATH = "/sd/psephos_help.bin"
+HELP_IMG_BYTES = (SCREEN_W * SCREEN_H) // 8   # MONO_HMSB: 12,800 byte
+
+
+def _draw_help_image():
+    """日本語ヘルプ画像を blit。成功なら True、ファイル無し等で失敗なら False。"""
+    try:
+        import framebuf
+    except ImportError:
+        return False
+    buf = bytearray(HELP_IMG_BYTES)
+    try:
+        with open(HELP_IMG_PATH, "rb") as f:
+            n = f.readinto(buf)
+        if n != HELP_IMG_BYTES:
+            return False
+    except OSError:
+        return False
+    src = framebuf.FrameBuffer(buf, SCREEN_W, SCREEN_H, framebuf.MONO_HMSB)
+    # 1bit -> 4bit のパレット (GS4_HMSB は高ニブル先頭)
+    pal_buf = bytearray(1)
+    pal_buf[0] = (COL_BG << 4) | (COL_FG & 0x0F)
+    palette = framebuf.FrameBuffer(pal_buf, 2, 1, framebuf.GS4_HMSB)
+    _clear()
+    try:
+        _display.blit(src, 0, 0, -1, palette)
+    except TypeError:
+        # palette 引数非対応ビルド向けフォールバック (パレット無し blit)
+        _display.blit(src, 0, 0)
+    _show()
+    return True
+
+
 def _show_help():
-    """全画面ヘルプを表示し、任意キーで戻る。"""
+    """全画面ヘルプを表示し、任意キーで戻る。
+
+    画像ファイル (/sd/psephos_help.bin) があれば日本語ヘルプ画像を表示、
+    なければ内蔵テキストヘルプ (_HELP_LINES) を 6x8 フォントで描画する。
+    """
     if not _HW:
         for line in _HELP_LINES:
             print(line)
         return
-    _clear()
-    for r, line in enumerate(_HELP_LINES):
-        if r >= ROWS:
-            break
-        _draw_text(0, r * CHAR_H, line[:COLS], COL_FG)
-    _show()
+
+    if not _draw_help_image():
+        # フォールバック: テキストヘルプ
+        _clear()
+        for r, line in enumerate(_HELP_LINES):
+            if r >= ROWS:
+                break
+            _draw_text(0, r * CHAR_H, line[:COLS], COL_FG)
+        _show()
+
     # 任意キーで戻る (エスケープシーケンス除く)
     while True:
         k = _read_key()

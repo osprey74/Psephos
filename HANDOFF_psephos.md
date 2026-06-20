@@ -120,11 +120,14 @@ LofiFren / zenodante の実機 `picocalc.py` を読み、以下を**事実とし
 
 ### Phase 4 — 仕上げ — ✅ 完了 (2026-06-18 実機検証)
 - [x] 関数一覧ヘルプ画面（`help` + Enter で全画面表示、任意キーで戻る）
+- [x] **日本語ヘルプ画像対応**（`tools/gen_help_image.py` で `assets/help_ja.bin` を生成 → SD `/sd/psephos_help.bin` に配置、`_show_help` が画像を blit。画像が無ければ ASCII テキストヘルプにフォールバック）
 - [x] テーマ切替（`theme` で一覧、`theme <name>` で適用、5 種類: default/amber/green/cyan/invert）
 - [x] 設定ファイル `/sd/psephos_config.txt`（theme/precision/history_max を永続化、起動時自動ロード）
 - [ ] 履歴ファイルのローテーション（肥大化対策、Phase 5 候補に送り）
 
-> 補足: LofiFren ファームウェアは `switchPredefinedLUT` API を提供せず、C ドライバ内に LUT が固定で焼き込まれている。標準 VT100 16 色パレットなので、`COL_FG/BG/DIM/ACC` のスロット番号を入れ替えるだけでテーマを実現した（C 側変更不要）。
+> 補足 1: LofiFren ファームウェアは `switchPredefinedLUT` API を提供せず、C ドライバ内に LUT が固定で焼き込まれている。標準 VT100 16 色パレットなので、`COL_FG/BG/DIM/ACC` のスロット番号を入れ替えるだけでテーマを実現した（C 側変更不要）。
+>
+> 補足 2: 実機 framebuf.MONO_HMSB は **公式 docs と挙動が異なり実質 LSB-first** だった（実機検証 2026-06-18）。Pillow の MSB-first 出力をそのまま blit すると 8 ピクセル毎にバイト内が反転して読めなくなる。`gen_help_image.py` は出力時にビット反転テーブル `translate()` を適用して対処。
 
 ---
 
