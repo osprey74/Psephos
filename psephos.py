@@ -36,8 +36,9 @@ ROWS = SCREEN_H // CHAR_H      # 40
 
 # レイアウト (chrome 画像非装着時の既定値 = 全画面利用)
 # chrome.bin がある場合は _maybe_load_chrome() がこれらを書き換える。
-HISTORY_LEFT_PX = 2 * CHAR_W                 # 履歴の左余白 (px) = 2 文字分
-HISTORY_COLS = COLS - 3                      # 左 2 + 右 1 文字分の余白を引いた表示可能列数
+HISTORY_LEFT_PX = 7                          # 履歴の左余白 (px)
+HISTORY_RIGHT_PX = 7                         # 履歴の右余白 (px、左と対称)
+HISTORY_COLS = (SCREEN_W - HISTORY_LEFT_PX - HISTORY_RIGHT_PX) // CHAR_W   # = 51
 # 入力行は `_draw_text_2x()` で 2 倍描画する。framebuf.text の組み込みフォントは 8x8
 # (PicoCalc の drawTxt6x8 とは別物) なので、ベースを 8x8 として計算する。
 INPUT_SCALE = 2                              # 入力行の拡大率
@@ -47,8 +48,8 @@ INPUT_CHAR_W = INPUT_BASE_W * INPUT_SCALE    # 16 px / char
 INPUT_CHAR_H = INPUT_BASE_H * INPUT_SCALE    # 16 px / char
 INPUT_COLS = SCREEN_W // INPUT_CHAR_W        # 320 / 16 = 20 cols
 
-INPUT_TOP_PAD = 3                            # 入力行とメッセージ行の間の余白 (px, 区切り線 + 上下 1px ずつ)
-INPUT_BOTTOM_PAD = 6                         # 入力行と chrome 下端の間の余白 (px)
+INPUT_TOP_PAD = 5                            # 入力行とメッセージ行の間の余白 (px, 区切り線 + 上下 2px ずつ)
+INPUT_BOTTOM_PAD = 2                         # 入力行と chrome 下端領域 (4px) の間の余白 (px)
 
 _ACTIVE_TOP = 0                              # 動的領域開始 y (px)
 _ACTIVE_BOTTOM = SCREEN_H                    # 動的領域終了 y (px, exclusive)
@@ -91,8 +92,8 @@ CONFIG_PATH = "/sd/psephos_config.txt"
 # Chrome レイヤ (アプリ枠) 関連
 CHROME_IMG_PATH = "/sd/psephos_chrome.bin"
 CHROME_BYTES = (SCREEN_W * SCREEN_H) // 2    # GS4_HMSB: 4bpp = 51,200 byte
-CHROME_TOP_DEFAULT_H = 16                    # chrome 上部の高さ (px)
-CHROME_BOTTOM_DEFAULT_H = 8                  # chrome 下部の高さ (px)
+CHROME_TOP_DEFAULT_H = 17                    # chrome 上部の高さ (px) — 履歴は y=17 から
+CHROME_BOTTOM_DEFAULT_H = 4                  # chrome 下部の高さ (px) — 画面下から 4px 確保 (うち下 2px が水平線)
 _chrome_buf = None                           # (bytearray, FrameBuffer) or None
 
 # 設定 (起動時に CONFIG_PATH からロード、`theme` 適用時に保存)
@@ -225,7 +226,7 @@ def _is_identifier(s):
     return True
 
 
-_COMMANDS = ("help", "theme")  # main() で特殊コマンドとして処理する名前
+_COMMANDS = ("help", "theme", "clear")  # main() で特殊コマンドとして処理する名前
 
 
 def _is_reserved_target(name):
@@ -573,6 +574,7 @@ _HELP_LINES = [
     "  help              this screen",
     "  theme             list available themes",
     "  theme <name>      apply theme (default/amber/green/cyan/invert)",
+    "  clear             clear history (asks y/n)",
     "",
     "Press any key to return...",
 ]
@@ -703,9 +705,9 @@ def render(history, buf, cursor, message=""):
             line = line[:HISTORY_COLS - 1] + "~"
         _draw_text(HISTORY_LEFT_PX, _HISTORY_Y0 + row * CHAR_H, line, COL_DIM)
 
-    # --- 区切り線 (入力行の上 2 px、メッセージ文字とも入力文字とも被らない位置) ---
+    # --- 区切り線 (入力行の 3 px 上、上下 2px の余白を確保) ---
     if hasattr(_display, "hline"):
-        _display.hline(0, _INPUT_Y - 2, SCREEN_W, COL_DIM)
+        _display.hline(0, _INPUT_Y - 3, SCREEN_W, COL_DIM)
 
     # --- 入力行 (2x スケール、カーソル位置を見せるためのスクロール) ---
     # 画面端から 1 文字分のマージンを確保 (INPUT_COLS - 1 列が実効表示幅)
@@ -839,6 +841,26 @@ def main():
                     message = "Unknown theme: " + name
                 buf = ""
                 cursor = 0
+                render(history, buf, cursor, message)
+                continue
+            if expr == "clear":
+                # y/n 確認プロンプトを出して履歴消去
+                buf = ""
+                cursor = 0
+                message = "Clear history? (y/n)"
+                render(history, buf, cursor, message)
+                while True:
+                    k = _read_key()
+                    if isinstance(k, tuple):
+                        continue                              # エスケープシーケンスは無視
+                    if k in ("y", "Y"):
+                        history.clear()
+                        message = "History cleared"
+                        break
+                    if k in ("n", "N", KEY_ESC):
+                        message = "Clear cancelled"
+                        break
+                    # それ以外は無視して継続
                 render(history, buf, cursor, message)
                 continue
             # --- 通常評価 ---
