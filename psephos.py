@@ -547,12 +547,87 @@ class _CasBox:
         self._draw(x, y, color)
 
 
+# --- Greek 文字グリフ (16x16、π のみ実装。π = 'pi' のシンボル置換) ---
+# 1 行 16 ビット (横幅) のビットマップを文字列で記述、'#' が点灯ピクセル
+_GLYPH_PI = (
+    "                ",   # row 0
+    "                ",   # row 1
+    "  ############  ",   # row 2: 上の横棒
+    "  ############  ",   # row 3
+    "                ",   # row 4
+    "    ##    ##    ",   # row 5: 左右の縦棒
+    "    ##    ##    ",   # row 6
+    "    ##    ##    ",   # row 7
+    "    ##    ##    ",   # row 8
+    "    ##    ##    ",   # row 9
+    "    ##    ##    ",   # row 10
+    "    ##    ##    ",   # row 11
+    "    ##    ##    ",   # row 12
+    "    ##    ##    ",   # row 13
+    "                ",   # row 14
+    "                ",   # row 15
+)
+
+
+# 名前 → グリフのマップ (将来 theta / phi / ... を追加可能)
+_GLYPH_MAP = {
+    "pi": _GLYPH_PI,
+}
+
+
+def _draw_glyph(x, y, glyph, color):
+    """指定のグリフ (string tuple) を (x, y) から 16x16 で描画。"""
+    if not _HW:
+        return
+    for py, row in enumerate(glyph):
+        for px, c in enumerate(row):
+            if c != " ":
+                _display.pixel(x + px, y + py, color)
+
+
+def _draw_text_small(x, y, s, color):
+    """8x8 framebuf 組み込みフォントを 1x スケールで描画 (指数用)。"""
+    if not _HW or not s:
+        return
+    import framebuf
+    str_w = len(s) * 8
+    pad_w = ((str_w + 7) // 8) * 8
+    buf = bytearray((pad_w * 8) // 8)
+    tmp = framebuf.FrameBuffer(buf, pad_w, 8, framebuf.MONO_HMSB)
+    tmp.fill(0)
+    tmp.text(s, 0, 0, 1)
+    for py in range(8):
+        for px in range(str_w):
+            if tmp.pixel(px, py):
+                _display.pixel(x + px, y + py, color)
+
+
 def _cas_text_box(s):
+    """通常サイズ (16x16) の文字列 box。`pi` 等はグリフへ置換。"""
+    # 名前がシンボルマップにあればグリフ描画 (例: 'pi' → π)
+    if s in _GLYPH_MAP:
+        glyph = _GLYPH_MAP[s]
+        w = 16
+        h = 16
+        bl = h // 2
+        def draw(x, y, color):
+            _draw_glyph(x, y, glyph, color)
+        return _CasBox(w, h, bl, draw)
     w = len(s) * _CAS_CHAR_W
     h = _CAS_CHAR_H
     bl = _CAS_CHAR_H // 2
     def draw(x, y, color):
         _draw_text_2x(x, y, s, color)
+    return _CasBox(w, h, bl, draw)
+
+
+def _cas_text_small_box(s):
+    """小サイズ (8x8) の文字列 box (指数用)。"""
+    w = len(s) * 8
+    h = 8
+    bl = h // 2
+    def draw(x, y, color):
+        _draw_text_small(x, y, s, color)
     return _CasBox(w, h, bl, draw)
 
 
@@ -642,12 +717,16 @@ def _cas_layout_fraction(num, denom):
 
 def _cas_layout_power(base, exp):
     bb = _cas_layout(base)
-    eb = _cas_layout(exp)
-    exp_offset = max(2, bb.h // 2)             # 指数を半文字分上にシフト (2x なら 8 px)
+    # 数値指数 (Num) は小フォントで描画。複雑式は通常サイズ。
+    if isinstance(exp, _CasNum):
+        eb = _cas_text_small_box(exp.text)
+    else:
+        eb = _cas_layout(exp)
+    exp_offset = max(2, bb.h // 2)                 # 指数を半文字分上にシフト
     above = bb.baseline + exp_offset
     h = above + (bb.h - bb.baseline)
     bl = above
-    w = bb.w + eb.w + 2                         # 1px → 2px に拡張
+    w = bb.w + eb.w + 2
     def draw(x, y, color):
         bb.render(x, y + above - bb.baseline, color)
         eb.render(x + bb.w + 2, y, color)
