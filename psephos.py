@@ -573,6 +573,12 @@ def _cas_layout(node):
             return _cas_layout_fraction(node.l, node.r)
         if node.op == "**":
             return _cas_layout_power(node.l, node.r)
+        # 暗黙の乗算 (数値係数 × シンボリック項) は * を省略して並置
+        if node.op == "*":
+            ln = isinstance(node.l, _CasNum)
+            rn = isinstance(node.r, _CasNum)
+            if (ln and not rn) or (rn and not ln):
+                return _cas_layout_implicit_mul(node.l, node.r)
         return _cas_layout_binop_inline(node.op, node.l, node.r)
     if isinstance(node, _CasCall):
         if node.name == "sqrt" and len(node.args) == 1:
@@ -581,6 +587,22 @@ def _cas_layout(node):
             return _cas_layout_abs(node.args[0])
         return _cas_layout_call(node.name, node.args)
     raise ValueError("CAS: unknown node")
+
+
+def _cas_layout_implicit_mul(l, r):
+    """暗黙の乗算 (2√5 のように * を表示しない並置レイアウト)。"""
+    lb = _cas_layout(l)
+    rb = _cas_layout(r)
+    above = max(lb.baseline, rb.baseline)
+    below = max(lb.h - lb.baseline, rb.h - rb.baseline)
+    h = above + below
+    bl = above
+    gap = 2                                  # 文字間の小さな視覚間隔 (px)
+    w = lb.w + gap + rb.w
+    def draw(x, y, color):
+        lb.render(x, y + above - lb.baseline, color)
+        rb.render(x + lb.w + gap, y + above - rb.baseline, color)
+    return _CasBox(w, h, bl, draw)
 
 
 def _cas_layout_binop_inline(op, l, r):
@@ -716,6 +738,209 @@ def _cas_layout_call(name, args):
     return _CasBox(w, h, bl, draw)
 
 
+# --- Tier 2: 記号簡約 (基本のみ: 算術畳み込み / 分数約分 / sqrt 素因数分解 / 単純恒等式) ---
+
+def _gcd(a, b):
+    a, b = abs(a), abs(b)
+    while b:
+        a, b = b, a % b
+    return a
+
+
+def _extract_sqrt(n):
+    """n から完全平方因子を抽出。n = sq*sq * rem として (sq, rem) を返す。"""
+    if n <= 0:
+        return 1, n
+    sq = 1
+    i = 2
+    while i * i <= n:
+        if n % (i * i) == 0:
+            n //= (i * i)
+            sq *= i
+        else:
+            i += 1
+    return sq, n
+
+
+def _num_text(v):
+    """数値を CasNum 用のテキスト表現にする (整数なら小数点なし)。"""
+    if isinstance(v, float):
+        if v == int(v) and abs(v) < 1e15:
+            return str(int(v))
+        return "{:.10g}".format(v)
+    return str(v)
+
+
+def _is_num_eq(node, val):
+    if not isinstance(node, _CasNum):
+        return False
+    try:
+        return float(node.text) == val
+    except ValueError:
+        return False
+
+
+def _try_int(text):
+    """テキストを int に変換。10/16/2/8 進対応。失敗時 None。"""
+    try:
+        if text.startswith(("0x", "0X")):
+            return int(text, 16)
+        if text.startswith(("0b", "0B")):
+            return int(text, 2)
+        if text.startswith(("0o", "0O")):
+            return int(text, 8)
+        if "." in text or "e" in text or "E" in text:
+            return None
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _try_float(text):
+    try:
+        if text.startswith(("0x", "0X")):
+            return float(int(text, 16))
+        if text.startswith(("0b", "0B")):
+            return float(int(text, 2))
+        if text.startswith(("0o", "0O")):
+            return float(int(text, 8))
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _cas_simplify(node):
+    """AST を再帰的に簡約。簡約不能なら同形ノードを返す。"""
+    if isinstance(node, _CasNum) or isinstance(node, _CasVar):
+        return node
+    if isinstance(node, _CasUnaryOp):
+        x = _cas_simplify(node.x)
+        if node.op == "+":
+            return x
+        if node.op == "-" and isinstance(x, _CasNum):
+            v = _try_float(x.text)
+            if v is not None:
+                return _CasNum(_num_text(-v))
+        return _CasUnaryOp(node.op, x)
+    if isinstance(node, _CasBinOp):
+        l = _cas_simplify(node.l)
+        r = _cas_simplify(node.r)
+        op = node.op
+        # 整数畳み込み (両辺整数のとき)
+        li = _try_int(l.text) if isinstance(l, _CasNum) else None
+        ri = _try_int(r.text) if isinstance(r, _CasNum) else None
+        if li is not None and ri is not None:
+            if op == "+":
+                return _CasNum(_num_text(li + ri))
+            if op == "-":
+                return _CasNum(_num_text(li - ri))
+            if op == "*":
+                return _CasNum(_num_text(li * ri))
+            if op == "/":
+                if ri != 0:
+                    g = _gcd(li, ri)
+                    if g > 0:
+                        ln, rn = li // g, ri // g
+                        if rn == 1:
+                            return _CasNum(_num_text(ln))
+                        if rn == -1:
+                            return _CasNum(_num_text(-ln))
+                        return _CasBinOp("/", _CasNum(_num_text(ln)), _CasNum(_num_text(rn)))
+            if op == "%" and ri != 0:
+                return _CasNum(_num_text(li % ri))
+            if op == "**" and ri >= 0:
+                return _CasNum(_num_text(li ** ri))
+        # 浮動小数畳み込み (両辺数値・整数簡約失敗のとき)
+        lf = _try_float(l.text) if isinstance(l, _CasNum) else None
+        rf = _try_float(r.text) if isinstance(r, _CasNum) else None
+        if lf is not None and rf is not None and (li is None or ri is None):
+            try:
+                if op == "+":
+                    return _CasNum(_num_text(lf + rf))
+                if op == "-":
+                    return _CasNum(_num_text(lf - rf))
+                if op == "*":
+                    return _CasNum(_num_text(lf * rf))
+                if op == "/" and rf != 0:
+                    return _CasNum(_num_text(lf / rf))
+                if op == "**":
+                    return _CasNum(_num_text(lf ** rf))
+            except (ValueError, ZeroDivisionError, OverflowError):
+                pass
+        # 恒等式
+        if op == "+":
+            if _is_num_eq(l, 0):
+                return r
+            if _is_num_eq(r, 0):
+                return l
+        elif op == "-":
+            if _is_num_eq(r, 0):
+                return l
+        elif op == "*":
+            if _is_num_eq(l, 1):
+                return r
+            if _is_num_eq(r, 1):
+                return l
+            if _is_num_eq(l, 0) or _is_num_eq(r, 0):
+                return _CasNum("0")
+        elif op == "/":
+            if _is_num_eq(r, 1):
+                return l
+        # 乗算 × 分数の畳み込み: (a/b)*c → (a*c)/b、c*(a/b) → (c*a)/b
+        if op == "*":
+            if isinstance(l, _CasBinOp) and l.op == "/" and isinstance(r, _CasNum):
+                new_num = _cas_simplify(_CasBinOp("*", l.l, r))
+                return _CasBinOp("/", new_num, l.r)
+            if isinstance(r, _CasBinOp) and r.op == "/" and isinstance(l, _CasNum):
+                new_num = _cas_simplify(_CasBinOp("*", l, r.l))
+                return _CasBinOp("/", new_num, r.r)
+            # 数値係数を前に: (non-Num) * Num → Num * (non-Num)
+            if isinstance(r, _CasNum) and not isinstance(l, _CasNum):
+                return _CasBinOp("*", r, l)
+        return _CasBinOp(op, l, r)
+    if isinstance(node, _CasCall):
+        args = [_cas_simplify(a) for a in node.args]
+        # sqrt 素因数分解
+        if node.name == "sqrt" and len(args) == 1:
+            a = args[0]
+            if isinstance(a, _CasNum):
+                vi = _try_int(a.text)
+                if vi is not None and vi >= 0:
+                    sq, rem = _extract_sqrt(vi)
+                    if rem == 1:
+                        return _CasNum(_num_text(sq))
+                    if sq > 1:
+                        return _CasBinOp(
+                            "*",
+                            _CasNum(_num_text(sq)),
+                            _CasCall("sqrt", [_CasNum(_num_text(rem))]),
+                        )
+        return _CasCall(node.name, args)
+    return node
+
+
+def _cas_nodes_equal(a, b):
+    """AST 構造比較 (簡約前後の変化検出に使う)。"""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, _CasNum):
+        return a.text == b.text
+    if isinstance(a, _CasVar):
+        return a.name == b.name
+    if isinstance(a, _CasUnaryOp):
+        return a.op == b.op and _cas_nodes_equal(a.x, b.x)
+    if isinstance(a, _CasBinOp):
+        return a.op == b.op and _cas_nodes_equal(a.l, b.l) and _cas_nodes_equal(a.r, b.r)
+    if isinstance(a, _CasCall):
+        if a.name != b.name or len(a.args) != len(b.args):
+            return False
+        for ai, bi in zip(a.args, b.args):
+            if not _cas_nodes_equal(ai, bi):
+                return False
+        return True
+    return False
+
+
 # --- 履歴参照解決 + 表示 ---
 
 def _cas_resolve_ref(ref, history):
@@ -732,30 +957,83 @@ def _cas_resolve_ref(ref, history):
 
 
 def _show_big_calc(expr_str, res_str):
-    """計算式と結果を 2x スケールで動的領域中央に表示し、任意キーで戻る。
+    """計算結果を最大 4 行で動的領域中央に表示し、任意キーで戻る。
 
-    レイアウト:
-        中央上段に `expr_str` (FG 色)
-        中央下段に `= res_str` (ACC 色)
-        2 行の間は 1 文字ぶん (16 px) の余白
-    画面幅に収まらない場合は末尾省略 (`~` を追加)。
+    レイアウト (上から):
+        Line 1: 数値計算入力式 (テキスト 2x、FG)
+        Line 2: 入力式の数式記法 (CAS layout、FG) — パース成功時
+        Line 3: 数値計算結果 `= res_str` (テキスト 2x、ACC)
+        Line 4: 記号計算結果の数式記法 (CAS layout、ACC) — 簡約形が
+                入力式と異なる場合のみ
+    画面に収まらない場合は末尾省略 (テキスト) / そのまま (CAS layout)。
     """
     if not _HW:
         print(expr_str + " = " + res_str)
         return
     max_cols = SCREEN_W // _CAS_CHAR_W
-    expr_disp = expr_str if len(expr_str) <= max_cols else expr_str[:max_cols - 1] + "~"
-    eq_str = "= " + res_str
-    eq_disp = eq_str if len(eq_str) <= max_cols else eq_str[:max_cols - 1] + "~"
-    line_gap = _CAS_CHAR_H                       # 1 文字ぶんの空き
-    total_h = _CAS_CHAR_H * 2 + line_gap
+
+    def _trunc(s):
+        return s if len(s) <= max_cols else s[:max_cols - 1] + "~"
+
+    expr_disp = _trunc(expr_str)
+    eq_disp = _trunc("= " + res_str)
+
+    # パース + 簡約 (失敗時は line 2/4 をスキップ)
+    node = None
+    simplified = None
+    try:
+        node = _cas_parse(expr_str)
+        simplified = _cas_simplify(node)
+    except Exception:
+        pass
+
+    line_box = None
+    line_box_simp = None
+    if node is not None:
+        try:
+            line_box = _cas_layout(node)
+        except Exception:
+            line_box = None
+        # 4 行目 (簡約結果) は次のすべてを満たすときのみ表示:
+        # - 簡約が成功している
+        # - 簡約 AST が原式 AST と構造的に異なる
+        # - 簡約結果が「数値リテラルかつ数値結果と同値」ではない (重複抑制)
+        if simplified is not None and not _cas_nodes_equal(node, simplified):
+            redundant = (
+                isinstance(simplified, _CasNum) and simplified.text == res_str
+            )
+            if not redundant:
+                try:
+                    line_box_simp = _cas_layout(simplified)
+                except Exception:
+                    line_box_simp = None
+
+    # 各行 (height, width, draw(x, y)) のリストを構築
+    lines = []
+    lines.append((_CAS_CHAR_H, len(expr_disp) * _CAS_CHAR_W,
+                  lambda x, y, s=expr_disp: _draw_text_2x(x, y, s, COL_FG)))
+    if line_box is not None:
+        b = line_box
+        lines.append((b.h, b.w,
+                      lambda x, y, box=b: box.render(x, y, COL_FG)))
+    lines.append((_CAS_CHAR_H, len(eq_disp) * _CAS_CHAR_W,
+                  lambda x, y, s=eq_disp: _draw_text_2x(x, y, s, COL_ACC)))
+    if line_box_simp is not None:
+        b = line_box_simp
+        lines.append((b.h, b.w,
+                      lambda x, y, box=b: box.render(x, y, COL_ACC)))
+
+    gap = _CAS_CHAR_H // 2                       # 行間 8 px
+    total_h = sum(h for h, _w, _d in lines) + gap * (len(lines) - 1)
     avail = _ACTIVE_BOTTOM - _ACTIVE_TOP
     top_y = _ACTIVE_TOP + max(0, (avail - total_h) // 2)
-    expr_x = max(0, (SCREEN_W - len(expr_disp) * _CAS_CHAR_W) // 2)
-    eq_x = max(0, (SCREEN_W - len(eq_disp) * _CAS_CHAR_W) // 2)
+
     _clear_active()
-    _draw_text_2x(expr_x, top_y, expr_disp, COL_FG)
-    _draw_text_2x(eq_x, top_y + _CAS_CHAR_H + line_gap, eq_disp, COL_ACC)
+    y = top_y
+    for h, w, draw_fn in lines:
+        x = max(0, (SCREEN_W - w) // 2)
+        draw_fn(x, y)
+        y += h + gap
     _show()
     while True:
         k = _read_key()
