@@ -256,19 +256,41 @@ def _is_allowed_name(name):
 
 
 def _check_safe(expr):
-    """安全でない式を ValueError で弾く。
+    """安全でない式を ValueError で弾く (AST ベース)。
 
     MicroPython の eval は {"__builtins__": {}} を渡しても組み込み関数を
     遮断しない (CPython と挙動が異なり、実機で確認済 2026-06-18)。
-    そこで字句レベルで識別子をホワイトリスト方式で検査する追加防御を行う:
+    そこで内製 CAS パーサで AST を構築し、ノード単位で検査する:
       1. "__" を含む式は拒否 (dunder 経由のリフレクション攻撃を遮断)
-      2. _NAMESPACE / "ans" / "ans<N>" / ユーザ変数以外の識別子を拒否
+      2. パース不能な式 (文字列リテラル・属性アクセス・lambda 等を含む) は拒否
+      3. AST 上の **関数呼び出し** (`_CasCall`) は _NAMESPACE の関数に限定
+      4. 変数参照は自由 (eval が NameError なら呼び出し側で symbolic mode に落とす)
+
+    これにより `x + x` のような未定義変数を含む式は通り、`open(...)` や
+    `(open)(0)` のような呼び出しは AST 構造から確実にブロックされる。
     """
     if "__" in expr:
         raise ValueError("disallowed: __ in expr")
-    for ident in _extract_names(expr):
-        if not _is_allowed_name(ident):
-            raise ValueError("disallowed name: " + ident)
+    try:
+        node = _cas_parse(expr)
+    except Exception:
+        raise ValueError("invalid syntax")
+    _check_safe_node(node)
+
+
+def _check_safe_node(node):
+    """AST を再帰的に検査。未許可の関数呼び出しを発見したら ValueError。"""
+    if isinstance(node, _CasCall):
+        if node.name not in _NAMESPACE:
+            raise ValueError("disallowed call: " + node.name)
+        for a in node.args:
+            _check_safe_node(a)
+    elif isinstance(node, _CasBinOp):
+        _check_safe_node(node.l)
+        _check_safe_node(node.r)
+    elif isinstance(node, _CasUnaryOp):
+        _check_safe_node(node.x)
+    # _CasNum, _CasVar はそれ自体安全
 
 
 def _split_assignment(expr):
@@ -1154,18 +1176,19 @@ def _cas_resolve_ref(ref, history):
 
 
 def _show_big_calc(expr_str, res_str):
-    """計算結果を最大 4 行で動的領域中央に表示し、任意キーで戻る。
+    """計算結果を動的領域中央に表示し、任意キーで戻る。
 
     レイアウト (上から):
-        Line 1: 数値計算入力式 (テキスト 2x、FG)
+        Line 1: 入力式 (テキスト 2x、FG)
         Line 2: 入力式の数式記法 (CAS layout、FG) — パース成功時
-        Line 3: 数値計算結果 `= res_str` (テキスト 2x、ACC)
-        Line 4: 記号計算結果の数式記法 (CAS layout、ACC) — 簡約形が
-                入力式と異なる場合のみ
-    画面に収まらない場合は末尾省略 (テキスト) / そのまま (CAS layout)。
+        Line 3: 数値計算結果 `= res_str` (テキスト 2x、ACC) — res_str が None でなければ
+        Line 4: 記号簡約結果の数式記法 (CAS layout、ACC) — 簡約形が異なる場合
+
+    `res_str` に None を渡すと「symbolic-only モード」になり Line 3 を省略する
+    (eval が NameError で失敗したケース)。
     """
     if not _HW:
-        print(expr_str + " = " + res_str)
+        print(expr_str + (" = " + res_str if res_str is not None else "  (symbolic)"))
         return
     max_cols = SCREEN_W // _CAS_CHAR_W
 
@@ -1173,7 +1196,7 @@ def _show_big_calc(expr_str, res_str):
         return s if len(s) <= max_cols else s[:max_cols - 1] + "~"
 
     expr_disp = _trunc(expr_str)
-    eq_disp = _trunc("= " + res_str)
+    eq_disp = _trunc("= " + res_str) if res_str is not None else None
 
     # パース + 簡約 (失敗時は line 2/4 をスキップ)
     node = None
@@ -1194,10 +1217,12 @@ def _show_big_calc(expr_str, res_str):
         # 4 行目 (簡約結果) は次のすべてを満たすときのみ表示:
         # - 簡約が成功している
         # - 簡約 AST が原式 AST と構造的に異なる
-        # - 簡約結果が「数値リテラルかつ数値結果と同値」ではない (重複抑制)
+        # - 数値結果ありの場合、簡約結果が「数値リテラルかつ res_str と同値」ではない (重複抑制)
         if simplified is not None and not _cas_nodes_equal(node, simplified):
             redundant = (
-                isinstance(simplified, _CasNum) and simplified.text == res_str
+                res_str is not None
+                and isinstance(simplified, _CasNum)
+                and simplified.text == res_str
             )
             if not redundant:
                 try:
@@ -1213,8 +1238,9 @@ def _show_big_calc(expr_str, res_str):
         b = line_box
         lines.append((b.h, b.w,
                       lambda x, y, box=b: box.render(x, y, COL_FG)))
-    lines.append((_CAS_CHAR_H, len(eq_disp) * _CAS_CHAR_W,
-                  lambda x, y, s=eq_disp: _draw_text_2x(x, y, s, COL_ACC)))
+    if eq_disp is not None:
+        lines.append((_CAS_CHAR_H, len(eq_disp) * _CAS_CHAR_W,
+                      lambda x, y, s=eq_disp: _draw_text_2x(x, y, s, COL_ACC)))
     if line_box_simp is not None:
         b = line_box_simp
         lines.append((b.h, b.w,
@@ -1821,6 +1847,12 @@ def main():
                 res_str = _format(result)
                 history.add(expr, res_str)
                 _show_big_calc(expr, res_str)        # 2x 全画面表示 → 任意キーで戻る
+                _redraw_chrome()
+                message = ""
+            except NameError:
+                # 未定義変数を含む式: 数値計算は不能だが symbolic 表示する
+                history.add(expr, "")
+                _show_big_calc(expr, None)            # res_str=None で symbolic-only
                 _redraw_chrome()
                 message = ""
             except ZeroDivisionError:
