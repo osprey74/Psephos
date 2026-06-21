@@ -659,7 +659,8 @@ def _cas_layout(node):
     if isinstance(node, _CasVar):
         return _cas_text_box(node.name)
     if isinstance(node, _CasUnaryOp):
-        xb = _cas_layout(node.x)
+        # -x で x が BinOp なら括弧 (-(a+b))
+        xb = _cas_layout_with_paren(node.x, 4, is_right=False, outer_op=node.op)
         op = node.op
         def draw(x, y, color):
             _draw_text_2x(x, y + xb.baseline - _CAS_CHAR_H // 2, op, color)
@@ -670,11 +671,12 @@ def _cas_layout(node):
             return _cas_layout_fraction(node.l, node.r)
         if node.op == "**":
             return _cas_layout_power(node.l, node.r)
-        # 暗黙の乗算 (数値係数 × シンボリック項) は * を省略して並置
+        # 暗黙の乗算 (数値 × 数値以外、または両辺ともに非数値) は * を省略して並置。
+        # 両辺が数値リテラルのときだけ "2*3" のように * を残す (`23` と紛れるため)。
         if node.op == "*":
             ln = isinstance(node.l, _CasNum)
             rn = isinstance(node.r, _CasNum)
-            if (ln and not rn) or (rn and not ln):
+            if not (ln and rn):
                 return _cas_layout_implicit_mul(node.l, node.r)
         return _cas_layout_binop_inline(node.op, node.l, node.r)
     if isinstance(node, _CasCall):
@@ -686,15 +688,58 @@ def _cas_layout(node):
     raise ValueError("CAS: unknown node")
 
 
+# --- 括弧の自動付与 ---
+
+def _cas_prec(node):
+    """演算子優先順位 (高いほど結合が強い)。atom = 5、unary = 4、** = 3、*/% = 2、+- = 1。"""
+    if isinstance(node, _CasBinOp):
+        if node.op in ("+", "-"):
+            return 1
+        if node.op in ("*", "/", "%"):
+            return 2
+        if node.op == "**":
+            return 3
+    if isinstance(node, _CasUnaryOp):
+        return 4
+    return 5
+
+
+def _cas_paren_box(inner):
+    """inner の左右に '(' ')' (2x スケール) を付けた Box を返す。"""
+    paren_w = _CAS_CHAR_W
+    paren_h = _CAS_CHAR_H
+    h = max(inner.h, paren_h)
+    bl = max(inner.baseline, paren_h // 2)
+    w = paren_w + inner.w + paren_w
+    def draw(x, y, color):
+        _draw_text_2x(x, y + bl - paren_h // 2, "(", color)
+        inner.render(x + paren_w, y + bl - inner.baseline, color)
+        _draw_text_2x(x + paren_w + inner.w, y + bl - paren_h // 2, ")", color)
+    return _CasBox(w, h, bl, draw)
+
+
+def _cas_layout_with_paren(node, outer_prec, is_right=False, outer_op=None):
+    """node のレイアウトを返す。outer_prec より優先順位が低い場合、または
+    非可換演算 (-, /, %) の右側に同優先順位の演算がある場合、`(` `)` で囲む。"""
+    box = _cas_layout(node)
+    n_prec = _cas_prec(node)
+    needs = False
+    if n_prec < outer_prec:
+        needs = True
+    elif n_prec == outer_prec and is_right and outer_op in ("-", "/", "%"):
+        needs = True
+    return _cas_paren_box(box) if needs else box
+
+
 def _cas_layout_implicit_mul(l, r):
-    """暗黙の乗算 (2√5 のように * を表示しない並置レイアウト)。"""
-    lb = _cas_layout(l)
-    rb = _cas_layout(r)
+    """暗黙の乗算 (2√5 のように * を表示しない並置レイアウト)。必要なら括弧付き。"""
+    lb = _cas_layout_with_paren(l, 2, is_right=False, outer_op="*")
+    rb = _cas_layout_with_paren(r, 2, is_right=True, outer_op="*")
     above = max(lb.baseline, rb.baseline)
     below = max(lb.h - lb.baseline, rb.h - rb.baseline)
     h = above + below
     bl = above
-    gap = 2                                  # 文字間の小さな視覚間隔 (px)
+    gap = 2
     w = lb.w + gap + rb.w
     def draw(x, y, color):
         lb.render(x, y + above - lb.baseline, color)
@@ -703,8 +748,9 @@ def _cas_layout_implicit_mul(l, r):
 
 
 def _cas_layout_binop_inline(op, l, r):
-    lb = _cas_layout(l)
-    rb = _cas_layout(r)
+    outer_prec = 2 if op in ("*", "/", "%") else 1
+    lb = _cas_layout_with_paren(l, outer_prec, is_right=False, outer_op=op)
+    rb = _cas_layout_with_paren(r, outer_prec, is_right=True, outer_op=op)
     op_text = " " + op + " "
     op_w = len(op_text) * _CAS_CHAR_W
     above = max(lb.baseline, rb.baseline)
@@ -738,12 +784,13 @@ def _cas_layout_fraction(num, denom):
 
 
 def _cas_layout_power(base, exp):
-    bb = _cas_layout(base)
-    # 数値指数 (Num) は小フォントで描画。複雑式は通常サイズ。
+    # 底に低優先順位演算が来たら括弧 ((a+b)^2 等)
+    bb = _cas_layout_with_paren(base, 3, is_right=False, outer_op="**")
+    # 指数: 数値は小フォント、それ以外は通常レイアウトに括弧付き (2^(a+b) 等)
     if isinstance(exp, _CasNum):
         eb = _cas_text_small_box(exp.text)
     else:
-        eb = _cas_layout(exp)
+        eb = _cas_layout_with_paren(exp, 3, is_right=True, outer_op="**")
     exp_offset = max(2, bb.h // 2)                 # 指数を半文字分上にシフト
     above = bb.baseline + exp_offset
     h = above + (bb.h - bb.baseline)
