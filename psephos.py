@@ -226,7 +226,7 @@ def _is_identifier(s):
     return True
 
 
-_COMMANDS = ("help", "theme", "clear")  # main() で特殊コマンドとして処理する名前
+_COMMANDS = ("help", "theme", "clear", "cas")  # main() で特殊コマンドとして処理する名前
 
 
 def _is_reserved_target(name):
@@ -335,6 +335,469 @@ def evaluate(expr):
     result = eval(expr, {"__builtins__": {}}, _build_locals())
     _record_ans(result)
     return result
+
+
+# ---- CAS (記号計算 + 視覚レンダリング) ----------------------------------
+#
+# Phase 5a / Tier 1: 式パース → bounding box レイアウト → ハイブリッド描画
+# (framebuf 8x8 ASCII グリフを 2x で拡大 + 線描画プリミティブ)
+# 詳細は design/HANDOFF_phase5_cas.md を参照。
+# 記号簡約は Tier 2 で別途。Tier 1 はそのままの式を視覚化するのみ。
+
+# CAS レンダリング寸法 (2x スケール)
+_CAS_CHAR_W = 16        # 8x8 framebuf font × 2x = 16 px / char
+_CAS_CHAR_H = 16
+_CAS_LINE_W = 2         # 分数バー・オーバーラインの太さ (px)
+_CAS_SQRT_W = 10        # √ グリフ全体の幅 (px)
+
+
+# AST ノード型（クラスベース、メモリ最小化のため __slots__）
+class _CasNode:
+    pass
+
+
+class _CasNum(_CasNode):
+    __slots__ = ("text",)
+    def __init__(self, text):
+        self.text = text         # 文字列保持 (10進・16進・指数表記そのまま)
+
+
+class _CasVar(_CasNode):
+    __slots__ = ("name",)
+    def __init__(self, name):
+        self.name = name
+
+
+class _CasBinOp(_CasNode):
+    __slots__ = ("op", "l", "r")
+    def __init__(self, op, l, r):
+        self.op = op             # '+' '-' '*' '/' '**' '%'
+        self.l = l
+        self.r = r
+
+
+class _CasUnaryOp(_CasNode):
+    __slots__ = ("op", "x")
+    def __init__(self, op, x):
+        self.op = op             # '+' '-'
+        self.x = x
+
+
+class _CasCall(_CasNode):
+    __slots__ = ("name", "args")
+    def __init__(self, name, args):
+        self.name = name
+        self.args = args         # list[_CasNode]
+
+
+# --- Tokenizer / Parser ---
+
+def _cas_tokenize(s):
+    """式文字列をトークン列 [(kind, value), ...] に分解。"""
+    tokens = []
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c == " " or c == "\t":
+            i += 1
+            continue
+        if c.isdigit() or (c == "." and i + 1 < n and s[i + 1].isdigit()):
+            start = i
+            if c == "0" and i + 1 < n and s[i + 1] in "xXbBoO":
+                i += 2
+                while i < n and (s[i].isalpha() or s[i].isdigit() or s[i] == "_"):
+                    i += 1
+            else:
+                i += 1
+                while i < n:
+                    ch = s[i]
+                    if ch.isdigit() or ch == ".":
+                        i += 1
+                    elif ch in "eE":
+                        i += 1
+                        if i < n and s[i] in "+-":
+                            i += 1
+                    else:
+                        break
+            tokens.append(("NUM", s[start:i]))
+        elif c.isalpha() or c == "_":
+            start = i
+            while i < n and (s[i].isalpha() or s[i].isdigit() or s[i] == "_"):
+                i += 1
+            tokens.append(("NAME", s[start:i]))
+        elif c == "*" and i + 1 < n and s[i + 1] == "*":
+            tokens.append(("**", "**"))
+            i += 2
+        elif c in "+-*/%(),":
+            tokens.append((c, c))
+            i += 1
+        else:
+            raise ValueError("CAS: unexpected char " + repr(c))
+    return tokens
+
+
+class _CasParser:
+    def __init__(self, tokens):
+        self.toks = tokens
+        self.pos = 0
+
+    def _peek(self):
+        return self.toks[self.pos] if self.pos < len(self.toks) else None
+
+    def _eat(self):
+        t = self._peek()
+        if t is not None:
+            self.pos += 1
+        return t
+
+    def _expect(self, kind):
+        t = self._peek()
+        if t is None or t[0] != kind:
+            raise ValueError("CAS: expected " + kind)
+        return self._eat()
+
+    def parse(self):
+        node = self._add()
+        if self._peek() is not None:
+            raise ValueError("CAS: trailing tokens")
+        return node
+
+    def _add(self):
+        left = self._mul()
+        while True:
+            t = self._peek()
+            if t is None or t[0] not in ("+", "-"):
+                break
+            op = self._eat()[0]
+            left = _CasBinOp(op, left, self._mul())
+        return left
+
+    def _mul(self):
+        left = self._unary()
+        while True:
+            t = self._peek()
+            if t is None or t[0] not in ("*", "/", "%"):
+                break
+            op = self._eat()[0]
+            left = _CasBinOp(op, left, self._unary())
+        return left
+
+    def _unary(self):
+        t = self._peek()
+        if t and t[0] in ("+", "-"):
+            op = self._eat()[0]
+            return _CasUnaryOp(op, self._unary())
+        return self._pow()
+
+    def _pow(self):
+        left = self._atom()
+        t = self._peek()
+        if t and t[0] == "**":
+            self._eat()
+            return _CasBinOp("**", left, self._unary())  # 右結合
+        return left
+
+    def _atom(self):
+        t = self._peek()
+        if t is None:
+            raise ValueError("CAS: unexpected end")
+        if t[0] == "NUM":
+            self._eat()
+            return _CasNum(t[1])
+        if t[0] == "NAME":
+            self._eat()
+            name = t[1]
+            if self._peek() and self._peek()[0] == "(":
+                self._eat()
+                args = []
+                if self._peek() and self._peek()[0] != ")":
+                    args.append(self._add())
+                    while self._peek() and self._peek()[0] == ",":
+                        self._eat()
+                        args.append(self._add())
+                self._expect(")")
+                return _CasCall(name, args)
+            return _CasVar(name)
+        if t[0] == "(":
+            self._eat()
+            node = self._add()
+            self._expect(")")
+            return node
+        raise ValueError("CAS: unexpected token " + repr(t))
+
+
+def _cas_parse(expr_str):
+    return _CasParser(_cas_tokenize(expr_str)).parse()
+
+
+# --- Layout (bounding box + draw closure) ---
+
+class _CasBox:
+    """式描画用 bounding box。
+    w, h はピクセル単位の寸法。baseline は box 上端から「主行」までのピクセル数で、
+    二項演算で上下行揃え (基準揃え) に使う。draw は描画クロージャ。"""
+    __slots__ = ("w", "h", "baseline", "_draw")
+    def __init__(self, w, h, baseline, draw):
+        self.w = w
+        self.h = h
+        self.baseline = baseline
+        self._draw = draw
+    def render(self, x, y, color):
+        self._draw(x, y, color)
+
+
+def _cas_text_box(s):
+    w = len(s) * _CAS_CHAR_W
+    h = _CAS_CHAR_H
+    bl = _CAS_CHAR_H // 2
+    def draw(x, y, color):
+        _draw_text_2x(x, y, s, color)
+    return _CasBox(w, h, bl, draw)
+
+
+def _cas_layout(node):
+    if isinstance(node, _CasNum):
+        return _cas_text_box(node.text)
+    if isinstance(node, _CasVar):
+        return _cas_text_box(node.name)
+    if isinstance(node, _CasUnaryOp):
+        xb = _cas_layout(node.x)
+        op = node.op
+        def draw(x, y, color):
+            _draw_text_2x(x, y + xb.baseline - _CAS_CHAR_H // 2, op, color)
+            xb.render(x + _CAS_CHAR_W, y, color)
+        return _CasBox(_CAS_CHAR_W + xb.w, xb.h, xb.baseline, draw)
+    if isinstance(node, _CasBinOp):
+        if node.op == "/":
+            return _cas_layout_fraction(node.l, node.r)
+        if node.op == "**":
+            return _cas_layout_power(node.l, node.r)
+        return _cas_layout_binop_inline(node.op, node.l, node.r)
+    if isinstance(node, _CasCall):
+        if node.name == "sqrt" and len(node.args) == 1:
+            return _cas_layout_sqrt(node.args[0])
+        if node.name == "abs" and len(node.args) == 1:
+            return _cas_layout_abs(node.args[0])
+        return _cas_layout_call(node.name, node.args)
+    raise ValueError("CAS: unknown node")
+
+
+def _cas_layout_binop_inline(op, l, r):
+    lb = _cas_layout(l)
+    rb = _cas_layout(r)
+    op_text = " " + op + " "
+    op_w = len(op_text) * _CAS_CHAR_W
+    above = max(lb.baseline, rb.baseline)
+    below = max(lb.h - lb.baseline, rb.h - rb.baseline)
+    h = above + below
+    bl = above
+    w = lb.w + op_w + rb.w
+    def draw(x, y, color):
+        lb.render(x, y + above - lb.baseline, color)
+        _draw_text_2x(x + lb.w, y + above - _CAS_CHAR_H // 2, op_text, color)
+        rb.render(x + lb.w + op_w, y + above - rb.baseline, color)
+    return _CasBox(w, h, bl, draw)
+
+
+_CAS_FRAC_PAD = 2     # フラクションバーと分子・分母の間の余白 (px)
+
+
+def _cas_layout_fraction(num, denom):
+    nb = _cas_layout(num)
+    db = _cas_layout(denom)
+    bar_w = max(nb.w, db.w) + 8                              # 上下端より少し広めに
+    h = nb.h + _CAS_FRAC_PAD + _CAS_LINE_W + _CAS_FRAC_PAD + db.h
+    bl = nb.h + _CAS_FRAC_PAD + _CAS_LINE_W // 2             # 横棒中央を baseline に
+    def draw(x, y, color):
+        nb.render(x + (bar_w - nb.w) // 2, y, color)
+        bar_y = y + nb.h + _CAS_FRAC_PAD
+        if hasattr(_display, "fill_rect"):
+            _display.fill_rect(x, bar_y, bar_w, _CAS_LINE_W, color)
+        db.render(x + (bar_w - db.w) // 2, bar_y + _CAS_LINE_W + _CAS_FRAC_PAD, color)
+    return _CasBox(bar_w, h, bl, draw)
+
+
+def _cas_layout_power(base, exp):
+    bb = _cas_layout(base)
+    eb = _cas_layout(exp)
+    exp_offset = max(2, bb.h // 2)             # 指数を半文字分上にシフト (2x なら 8 px)
+    above = bb.baseline + exp_offset
+    h = above + (bb.h - bb.baseline)
+    bl = above
+    w = bb.w + eb.w + 2                         # 1px → 2px に拡張
+    def draw(x, y, color):
+        bb.render(x, y + above - bb.baseline, color)
+        eb.render(x + bb.w + 2, y, color)
+    return _CasBox(w, h, bl, draw)
+
+
+def _cas_draw_sqrt_glyph(x, y, h, color):
+    """√ 形のグリフを (x, y) から幅 _CAS_SQRT_W、高さ h で 2px 太線で描画。
+    右上 (x+W-2, y) が overline と接続する位置になる。"""
+    if not _HW:
+        return
+    bot_y = y + h - 1
+    # 左フック (右下がりの斜め、2px 太線)
+    if h >= 6 and hasattr(_display, "fill_rect"):
+        _display.fill_rect(x, bot_y - 4, 2, 2, color)        # 上端
+        _display.fill_rect(x + 2, bot_y - 2, 2, 2, color)    # 中央
+    if hasattr(_display, "fill_rect"):
+        _display.fill_rect(x + 4, bot_y - 1, 2, 2, color)    # 底点
+    # 右上への対角線 (x+4, bot_y) → (x+W-2, y)、2px 太
+    span = h - 1
+    dx = (_CAS_SQRT_W - 2) - 4                                # 通常 4
+    if span > 0:
+        for i in range(1, span + 1):
+            px = x + 4 + (dx * i) // span
+            py = bot_y - i
+            _display.pixel(px, py, color)
+            if px + 1 < x + _CAS_SQRT_W:
+                _display.pixel(px + 1, py, color)            # 2px 太
+
+
+def _cas_layout_sqrt(child):
+    xb = _cas_layout(child)
+    overline = _CAS_LINE_W
+    pad = 2                                           # オーバーラインと中身の間
+    h = xb.h + overline + pad
+    bl = h // 2
+    w = _CAS_SQRT_W + xb.w + 4                        # 末尾余白
+    def draw(x, y, color):
+        _cas_draw_sqrt_glyph(x, y, h, color)
+        overline_x = x + _CAS_SQRT_W
+        if hasattr(_display, "fill_rect"):
+            _display.fill_rect(overline_x, y, xb.w + 4, overline, color)
+        xb.render(overline_x + 2, y + overline + pad, color)
+    return _CasBox(w, h, bl, draw)
+
+
+def _cas_layout_abs(child):
+    xb = _cas_layout(child)
+    bar_pad = _CAS_CHAR_W // 2                       # 縦棒の左右パディング
+    w = bar_pad * 4 + xb.w
+    h = xb.h
+    bl = xb.baseline
+    def draw(x, y, color):
+        if hasattr(_display, "fill_rect"):
+            _display.fill_rect(x + bar_pad, y, _CAS_LINE_W, h, color)
+            _display.fill_rect(x + w - bar_pad - _CAS_LINE_W, y, _CAS_LINE_W, h, color)
+        xb.render(x + bar_pad * 2, y, color)
+    return _CasBox(w, h, bl, draw)
+
+
+def _cas_layout_call(name, args):
+    arg_boxes = [_cas_layout(a) for a in args]
+    name_w = len(name) * _CAS_CHAR_W
+    paren_w = _CAS_CHAR_W
+    sep_w = _CAS_CHAR_W * 2                          # ", "
+    aw = sum(b.w for b in arg_boxes) + (sep_w * max(0, len(arg_boxes) - 1))
+    w = name_w + paren_w + aw + paren_w
+    if arg_boxes:
+        above = max(b.baseline for b in arg_boxes)
+        below = max(b.h - b.baseline for b in arg_boxes)
+        above = max(above, _CAS_CHAR_H // 2)
+        below = max(below, _CAS_CHAR_H - _CAS_CHAR_H // 2)
+    else:
+        above = _CAS_CHAR_H // 2
+        below = _CAS_CHAR_H - _CAS_CHAR_H // 2
+    h = above + below
+    bl = above
+    def draw(x, y, color):
+        _draw_text_2x(x, y + above - _CAS_CHAR_H // 2, name + "(", color)
+        cx = x + name_w + paren_w
+        for i, ab in enumerate(arg_boxes):
+            if i > 0:
+                _draw_text_2x(cx, y + above - _CAS_CHAR_H // 2, ", ", color)
+                cx += sep_w
+            ab.render(cx, y + above - ab.baseline, color)
+            cx += ab.w
+        _draw_text_2x(cx, y + above - _CAS_CHAR_H // 2, ")", color)
+    return _CasBox(w, h, bl, draw)
+
+
+# --- 履歴参照解決 + 表示 ---
+
+def _cas_resolve_ref(ref, history):
+    """ref ('ans' / 'ans2' .. 'ansN') を履歴の式文字列に解決。失敗時 None。"""
+    if not history.items:
+        return None
+    if ref == "ans" or ref == "ans1":
+        return history.items[-1][0]
+    if ref.startswith("ans") and ref[3:] and ref[3:].isdigit():
+        n = int(ref[3:])
+        if 1 <= n <= len(history.items):
+            return history.items[-n][0]
+    return None
+
+
+def _show_big_calc(expr_str, res_str):
+    """計算式と結果を 2x スケールで動的領域中央に表示し、任意キーで戻る。
+
+    レイアウト:
+        中央上段に `expr_str` (FG 色)
+        中央下段に `= res_str` (ACC 色)
+        2 行の間は 1 文字ぶん (16 px) の余白
+    画面幅に収まらない場合は末尾省略 (`~` を追加)。
+    """
+    if not _HW:
+        print(expr_str + " = " + res_str)
+        return
+    max_cols = SCREEN_W // _CAS_CHAR_W
+    expr_disp = expr_str if len(expr_str) <= max_cols else expr_str[:max_cols - 1] + "~"
+    eq_str = "= " + res_str
+    eq_disp = eq_str if len(eq_str) <= max_cols else eq_str[:max_cols - 1] + "~"
+    line_gap = _CAS_CHAR_H                       # 1 文字ぶんの空き
+    total_h = _CAS_CHAR_H * 2 + line_gap
+    avail = _ACTIVE_BOTTOM - _ACTIVE_TOP
+    top_y = _ACTIVE_TOP + max(0, (avail - total_h) // 2)
+    expr_x = max(0, (SCREEN_W - len(expr_disp) * _CAS_CHAR_W) // 2)
+    eq_x = max(0, (SCREEN_W - len(eq_disp) * _CAS_CHAR_W) // 2)
+    _clear_active()
+    _draw_text_2x(expr_x, top_y, expr_disp, COL_FG)
+    _draw_text_2x(eq_x, top_y + _CAS_CHAR_H + line_gap, eq_disp, COL_ACC)
+    _show()
+    while True:
+        k = _read_key()
+        if isinstance(k, tuple):
+            continue
+        break
+
+
+def _show_cas(expr_str):
+    """式を視覚レンダリングして任意キーで戻る。"""
+    if not _HW:
+        print("CAS:", expr_str)
+        return
+    try:
+        node = _cas_parse(expr_str)
+        box = _cas_layout(node)
+    except Exception as ex:
+        _clear_active()
+        _draw_text(0, _ACTIVE_TOP + CHAR_H, "CAS parse error:", COL_ACC)
+        _draw_text(0, _ACTIVE_TOP + 2 * CHAR_H, str(ex)[:COLS], COL_FG)
+        _show()
+        while True:
+            k = _read_key()
+            if isinstance(k, tuple):
+                continue
+            break
+        return
+    _clear_active()
+    # box を動的領域の中央に配置 (はみ出す場合は左上に寄せる)
+    cx = max(0, (SCREEN_W - box.w) // 2)
+    avail_h = _ACTIVE_BOTTOM - _ACTIVE_TOP - CHAR_H  # 下部 1 行ぶんは元式表示用に確保
+    cy = _ACTIVE_TOP + max(0, (avail_h - box.h) // 2)
+    box.render(cx, cy, COL_FG)
+    # 元式テキストを薄く下に表示 (リファレンス)
+    src = expr_str[:COLS]
+    _draw_text(0, _ACTIVE_BOTTOM - CHAR_H, src, COL_DIM)
+    _show()
+    while True:
+        k = _read_key()
+        if isinstance(k, tuple):
+            continue
+        break
 
 
 # ---- 履歴管理 ------------------------------------------------------------
@@ -863,11 +1326,27 @@ def main():
                     # それ以外は無視して継続
                 render(history, buf, cursor, message)
                 continue
+            if expr == "cas" or expr.startswith("cas "):
+                # 履歴の式を CAS で視覚表示
+                ref = expr[4:].strip() if expr.startswith("cas ") else "ans"
+                src = _cas_resolve_ref(ref, history)
+                if src is None:
+                    message = "Usage: cas ans[N]  (N=1..10)"
+                else:
+                    _show_cas(src)
+                    _redraw_chrome()
+                    message = ""
+                buf = ""
+                cursor = 0
+                render(history, buf, cursor, message)
+                continue
             # --- 通常評価 ---
             try:
                 result = evaluate(expr)
                 res_str = _format(result)
                 history.add(expr, res_str)
+                _show_big_calc(expr, res_str)        # 2x 全画面表示 → 任意キーで戻る
+                _redraw_chrome()
                 message = ""
             except ZeroDivisionError:
                 message = "Error: division by zero"
