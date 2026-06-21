@@ -569,31 +569,373 @@ class _CasBox:
         self._draw(x, y, color)
 
 
-# --- Greek 文字グリフ (16x16、π のみ実装。π = 'pi' のシンボル置換) ---
-# 1 行 16 ビット (横幅) のビットマップを文字列で記述、'#' が点灯ピクセル
+# --- Greek 文字グリフ (各 16x16、'#' = 点灯) ---
+
 _GLYPH_PI = (
-    "                ",   # row 0
-    "                ",   # row 1
-    "  ############  ",   # row 2: 上の横棒
-    "  ############  ",   # row 3
-    "                ",   # row 4
-    "    ##    ##    ",   # row 5: 左右の縦棒
-    "    ##    ##    ",   # row 6
-    "    ##    ##    ",   # row 7
-    "    ##    ##    ",   # row 8
-    "    ##    ##    ",   # row 9
-    "    ##    ##    ",   # row 10
-    "    ##    ##    ",   # row 11
-    "    ##    ##    ",   # row 12
-    "    ##    ##    ",   # row 13
-    "                ",   # row 14
-    "                ",   # row 15
+    "                ",
+    "                ",
+    "  ############  ",
+    "  ############  ",
+    "                ",
+    "    ##    ##    ",
+    "    ##    ##    ",
+    "    ##    ##    ",
+    "    ##    ##    ",
+    "    ##    ##    ",
+    "    ##    ##    ",
+    "    ##    ##    ",
+    "    ##    ##    ",
+    "    ##    ##    ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_THETA = (
+    "                ",
+    "                ",
+    "     ####       ",
+    "    #    #      ",
+    "   #      #     ",
+    "   #      #     ",
+    "   ########     ",
+    "   #      #     ",
+    "   #      #     ",
+    "    #    #      ",
+    "     ####       ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_PHI = (
+    "                ",
+    "      ##        ",
+    "      ##        ",
+    "   ########     ",
+    "  ##  ##  ##    ",
+    "  #   ##   #    ",
+    "  #   ##   #    ",
+    "  #   ##   #    ",
+    "  ##  ##  ##    ",
+    "   ########     ",
+    "      ##        ",
+    "      ##        ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_LAMBDA = (
+    "                ",
+    "                ",
+    "   ##           ",
+    "    ##          ",
+    "     #          ",
+    "     ##         ",
+    "      #         ",
+    "      ##        ",
+    "     ###        ",
+    "     # ##       ",
+    "    #   ##      ",
+    "    #    ##     ",
+    "   ##     ##    ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_ALPHA = (
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "    ####    ##  ",
+    "   ##  ##   ##  ",
+    "  ##    ## ##   ",
+    "  ##    ####    ",
+    "  ##    ## ##   ",
+    "   ##  ##   ##  ",
+    "    ####    ##  ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_BETA = (
+    "                ",
+    "      ####      ",
+    "     #    #     ",
+    "    #      #    ",
+    "    #     #     ",
+    "    #####       ",
+    "    #    #      ",
+    "    #     #     ",
+    "    #    #      ",
+    "    #####       ",
+    "    #           ",
+    "    #           ",
+    "    #           ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_GAMMA = (
+    "                ",
+    "                ",
+    "                ",
+    "   #       #    ",
+    "   ##     ##    ",
+    "    #    #      ",
+    "    ##  ##      ",
+    "     ####       ",
+    "      ##        ",
+    "      ##        ",
+    "     #          ",
+    "    #           ",
+    "   #            ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_DELTA = (
+    "                ",
+    "       ####     ",
+    "      #         ",
+    "      #         ",
+    "       ##       ",
+    "        ##      ",
+    "       #  #     ",
+    "      #    #    ",
+    "      #    #    ",
+    "      #    #    ",
+    "       #  #     ",
+    "        ##      ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_EPSILON = (
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "     #####      ",
+    "    #     #     ",
+    "    #           ",
+    "     ####       ",
+    "    #           ",
+    "    #     #     ",
+    "     #####      ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_MU = (
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "   #      #     ",
+    "   #      #     ",
+    "   #      #     ",
+    "   #      #     ",
+    "   #      #     ",
+    "   #     ##     ",
+    "   ###  # #     ",
+    "   #            ",
+    "   #            ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_SIGMA = (
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "   ############ ",
+    "  ##       ###  ",
+    "  ##        ##  ",
+    "  ##        ##  ",
+    "   ##      ##   ",
+    "    ########    ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_TAU = (
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "   #########    ",
+    "       #        ",
+    "       #        ",
+    "       #        ",
+    "       #        ",
+    "       #  #     ",
+    "        ##      ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_OMEGA = (
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "  ##       ##   ",
+    " ####     ####  ",
+    " ## ##   ## ##  ",
+    " ##  ## ##  ##  ",
+    " ##   ###   ##  ",
+    "  ##   #   ##   ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_PHI_UPPER = (
+    "                ",
+    "       ##       ",
+    "    ########    ",
+    "   #   ##   #   ",
+    "  #    ##    #  ",
+    "  #    ##    #  ",
+    "  #    ##    #  ",
+    "  #    ##    #  ",
+    "  #    ##    #  ",
+    "   #   ##   #   ",
+    "    ########    ",
+    "       ##       ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_THETA_UPPER = (
+    "                ",
+    "                ",
+    "     ####       ",
+    "    #    #      ",
+    "   #      #     ",
+    "   #      #     ",
+    "   #      #     ",
+    "   #  ##  #     ",
+    "   #      #     ",
+    "   #      #     ",
+    "   #      #     ",
+    "    #    #      ",
+    "     ####       ",
+    "                ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_OMEGA_UPPER = (
+    "                ",
+    "                ",
+    "                ",
+    "     #####      ",
+    "    #     #     ",
+    "   #       #    ",
+    "   #       #    ",
+    "   #       #    ",
+    "   #       #    ",
+    "   #       #    ",
+    "    #     #     ",
+    "     #   #      ",
+    "   ##     ##    ",
+    "  ###     ###   ",
+    "                ",
+    "                ",
+)
+
+_GLYPH_SIGMA_UPPER = (
+    "                ",
+    "                ",
+    "  ###########   ",
+    "  #         #   ",
+    "   #        #   ",
+    "    #           ",
+    "     #          ",
+    "      #         ",
+    "       #        ",
+    "      #         ",
+    "     #          ",
+    "    #           ",
+    "   #            ",
+    "  #         #   ",
+    "  ###########   ",
+    "                ",
+)
+
+_GLYPH_DELTA_UPPER = (
+    "                ",
+    "                ",
+    "       ##       ",
+    "       ##       ",
+    "      ####      ",
+    "      ####      ",
+    "     ##  ##     ",
+    "     ##  ##     ",
+    "    ##    ##    ",
+    "    ##    ##    ",
+    "   ##      ##   ",
+    "   ##      ##   ",
+    "  ##        ##  ",
+    "  ##        ##  ",
+    "  ##############",
+    "                ",
 )
 
 
-# 名前 → グリフのマップ (将来 theta / phi / ... を追加可能)
+# 名前 → グリフのマップ (Python 識別子名 ⇒ Greek 文字グリフ)
+# 小文字
 _GLYPH_MAP = {
-    "pi": _GLYPH_PI,
+    "pi":      _GLYPH_PI,
+    "theta":   _GLYPH_THETA,
+    "phi":     _GLYPH_PHI,
+    "lambda":  _GLYPH_LAMBDA,
+    "alpha":   _GLYPH_ALPHA,
+    "beta":    _GLYPH_BETA,
+    "gamma":   _GLYPH_GAMMA,
+    "delta":   _GLYPH_DELTA,
+    "epsilon": _GLYPH_EPSILON,
+    "mu":      _GLYPH_MU,
+    "sigma":   _GLYPH_SIGMA,
+    "tau":     _GLYPH_TAU,
+    "omega":   _GLYPH_OMEGA,
+    # 大文字 (Python の予約語と被るので、慣習的に capitalized で使う)
+    "Phi":     _GLYPH_PHI_UPPER,
+    "Theta":   _GLYPH_THETA_UPPER,
+    "Omega":   _GLYPH_OMEGA_UPPER,
+    "Sigma":   _GLYPH_SIGMA_UPPER,
+    "Delta":   _GLYPH_DELTA_UPPER,
 }
 
 
@@ -1300,9 +1642,12 @@ def _show_big_calc(expr_str, res_str):
 
     _clear_active()
     y = top_y
-    for h, w, draw_fn in lines:
+    for i, (h, w, draw_fn) in enumerate(lines):
         x = max(0, (SCREEN_W - w) // 2)
-        draw_fn(x, y)
+        try:
+            draw_fn(x, y)
+        except Exception:
+            pass
         y += h + gap
     _show()
     while True:
@@ -1412,8 +1757,10 @@ POLL_MS = 10   # 実機キーポーリング間隔
 def _read_key():
     """1 文字(または特殊キー/エスケープシーケンス)を返すブロッキング入力。
 
-    実機 (PicoCalc): picocalc.keyboard.readinto(buf) は非ブロッキング。
-    キーは 1 回の呼び出しで完全な形で返る (実機検証済 2026-06-18):
+    実機 (PicoCalc): picocalc.terminal.readinto(buf) は非ブロッキング。
+    ランチャ経由起動時は terminal がキー入力をバッファリングするため、
+    keyboard 直接アクセスではなく terminal 経由で読む必要がある。
+    キーは 1 回の呼び出しで完全な形で返る:
         - 通常文字: 1 byte
         - Enter:    b'\\r\\n'   (2 byte)
         - Esc 単押: b'\\x1b\\x1b' (2 byte, picocalc.py 流儀)
@@ -1431,7 +1778,7 @@ def _read_key():
     buf = bytearray(8)
     while True:
         try:
-            n = picocalc.keyboard.readinto(buf)
+            n = picocalc.terminal.readinto(buf)
         except OSError:
             n = None
         if n:
@@ -1546,6 +1893,15 @@ def _redraw_chrome():
         _display.blit(_chrome_buf[1], 0, 0, -1, palette)
     except TypeError:
         _display.blit(_chrome_buf[1], 0, 0)
+
+
+def _free_chrome():
+    """`_chrome_buf` を解放し、had_chrome (元々ロードされていたか) を返す。
+    `_maybe_load_chrome` が再ロード可能なので、help 用にメモリを開ける時に使う。"""
+    global _chrome_buf
+    had = _chrome_buf is not None
+    _chrome_buf = None
+    return had
 
 
 def _clear_active():
@@ -1748,10 +2104,48 @@ def render(history, buf, cursor, message=""):
 # ---- メインループ --------------------------------------------------------
 
 def main():
+    try:
+        _main_run()
+    finally:
+        # 例外パスでも dupterm を必ず復元 (py_run.py の input() が動くように)
+        if _HW:
+            try:
+                import os as _os
+                _os.dupterm(_DUPTERM_PREV[0])
+            except Exception:
+                pass
+
+
+_DUPTERM_PREV = [None]
+
+
+def _main_run():
+    # ランチャ経由起動時のハードウェア・端末状態をクリーンアップ
+    if _HW:
+        # 1. dupterm を一時解除 (REPL とのキー入力競合を避ける)
+        try:
+            import os as _os
+            _DUPTERM_PREV[0] = _os.dupterm(None)
+        except Exception:
+            pass
+        # 2. Core1 auto-refresh を再有効化 (停止状態なら復帰)
+        try:
+            import picocalcdisplay
+            picocalcdisplay.startAutoUpdate()
+        except Exception:
+            pass
+        # 3. menu 残骸をクリア (snake.py 等他アプリ準拠)
+        try:
+            _display.fill(COL_BG)
+            _display.show()
+        except Exception:
+            pass
     _load_config()
     _apply_theme(_config.get("theme", "default"))
     _maybe_load_chrome()           # chrome.bin があればレイアウトを更新 + 起動時に blit
     _redraw_chrome()
+    if _HW:
+        _show()                     # chrome 表示確定
     history = History()
     buf = ""
     cursor = 0          # buf 内のカーソル位置 (0 〜 len(buf))
@@ -1815,6 +2209,7 @@ def main():
         if key == KEY_ESC:
             _clear()
             _show()
+            # dupterm 復元は main() の finally で処理
             return
 
         if key in (KEY_ENTER, KEY_ENTER2):
@@ -1826,8 +2221,26 @@ def main():
                 continue
             # --- 特殊コマンド: help / theme ---
             if expr == "help":
-                _show_help()
+                # ヘルプ用に chrome_buf (51200 byte) を解放してメモリ確保
+                _had_chrome = _free_chrome()
+                try:
+                    import gc as _gc
+                    _gc.collect()
+                except Exception:
+                    pass
+                try:
+                    _show_help()
+                except Exception as ex:
+                    message = "Help err: " + str(ex)[:COLS - 10]
+                # 終了後 chrome を再ロード
+                if _had_chrome:
+                    _maybe_load_chrome()
                 _redraw_chrome()         # ヘルプ画面が画面全体を覆っていたので chrome を復元
+                try:
+                    import gc as _gc
+                    _gc.collect()
+                except Exception:
+                    pass
                 buf = ""
                 cursor = 0
                 # message は維持 (ヘルプ前の状態を画面に残す)
