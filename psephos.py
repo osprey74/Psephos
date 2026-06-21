@@ -738,6 +738,57 @@ def _cas_layout_call(name, args):
     return _CasBox(w, h, bl, draw)
 
 
+# --- Tier 2 + 3a: 記号簡約 ---
+# 基本ルール:
+#   - 算術畳み込み (定数の計算結果に置換)
+#   - 分数約分 (gcd ベース)
+#   - sqrt の完全平方因子抽出
+#   - 単純恒等式 (x*1, x+0, ...)
+#   - 数値係数を前置 (sqrt(5)*9 -> 9*sqrt(5))
+#   - 暗黙の乗算 / 分数 normalization
+# Phase 5c 追加:
+#   - 同じ底のべき乗結合 (x^a * x^b -> x^(a+b)、x*x -> x^2)
+#   - 同類項結合 (a*x + b*x -> (a+b)*x、x+x -> 2*x)
+#   - 分配 (Num * (a±b) -> Num*a ± Num*b)
+
+
+def _extract_coef(node):
+    """ノードを (coef_int, rest_node) に分解する。同類項結合のため。
+    例:  2*x -> (2, x);  x -> (1, x);  -x -> (-1, x);  5 -> (5, None)
+    数値定数のみの場合 rest=None。整数係数として抽出できない場合 (1, node)。"""
+    if isinstance(node, _CasNum):
+        ci = _try_int(node.text)
+        if ci is not None:
+            return ci, None
+        return 1, node
+    if isinstance(node, _CasUnaryOp) and node.op == "-":
+        c, r = _extract_coef(node.x)
+        return -c, r
+    if isinstance(node, _CasBinOp) and node.op == "*":
+        if isinstance(node.l, _CasNum):
+            ci = _try_int(node.l.text)
+            if ci is not None:
+                return ci, node.r
+        if isinstance(node.r, _CasNum):
+            ci = _try_int(node.r.text)
+            if ci is not None:
+                return ci, node.l
+    return 1, node
+
+
+def _make_coef_term(coef, rest):
+    """係数 coef とシンボリック部分 rest から AST を再構築する。"""
+    if rest is None:
+        return _CasNum(_num_text(coef))
+    if coef == 0:
+        return _CasNum("0")
+    if coef == 1:
+        return rest
+    if coef == -1:
+        return _CasUnaryOp("-", rest)
+    return _CasBinOp("*", _CasNum(_num_text(coef)), rest)
+
+
 # --- Tier 2: 記号簡約 (基本のみ: 算術畳み込み / 分数約分 / sqrt 素因数分解 / 単純恒等式) ---
 
 def _gcd(a, b):
@@ -876,6 +927,8 @@ def _cas_simplify(node):
         elif op == "-":
             if _is_num_eq(r, 0):
                 return l
+            if _cas_nodes_equal(l, r):
+                return _CasNum("0")
         elif op == "*":
             if _is_num_eq(l, 1):
                 return r
@@ -886,6 +939,61 @@ def _cas_simplify(node):
         elif op == "/":
             if _is_num_eq(r, 1):
                 return l
+            if _cas_nodes_equal(l, r) and not _is_num_eq(r, 0):
+                return _CasNum("1")
+        # Phase 5c: 同類項結合 (a*x + b*x → (a+b)*x、x+x → 2*x、similar for -)
+        if op in ("+", "-"):
+            lc, lt = _extract_coef(l)
+            rc, rt = _extract_coef(r)
+            if lt is not None and rt is not None and _cas_nodes_equal(lt, rt):
+                new_coef = lc + rc if op == "+" else lc - rc
+                # 結合後の式に対し再帰的に簡約 (分配が必要な場合に有効)
+                return _cas_simplify(_make_coef_term(new_coef, lt))
+        # Phase 5c: 同じ底のべき乗結合 (x^a * x^b → x^(a+b)、x*x → x^2)
+        if op == "*":
+            # x * x → x^2
+            if _cas_nodes_equal(l, r) and not isinstance(l, _CasNum):
+                return _CasBinOp("**", l, _CasNum("2"))
+            # x^a * x^b → x^(a+b)
+            if (isinstance(l, _CasBinOp) and l.op == "**"
+                    and isinstance(r, _CasBinOp) and r.op == "**"
+                    and _cas_nodes_equal(l.l, r.l)):
+                new_exp = _cas_simplify(_CasBinOp("+", l.r, r.r))
+                return _CasBinOp("**", l.l, new_exp)
+            # x^a * x → x^(a+1)
+            if isinstance(l, _CasBinOp) and l.op == "**" and _cas_nodes_equal(l.l, r):
+                new_exp = _cas_simplify(_CasBinOp("+", l.r, _CasNum("1")))
+                return _CasBinOp("**", l.l, new_exp)
+            # x * x^a → x^(a+1)
+            if isinstance(r, _CasBinOp) and r.op == "**" and _cas_nodes_equal(l, r.l):
+                new_exp = _cas_simplify(_CasBinOp("+", r.r, _CasNum("1")))
+                return _CasBinOp("**", l, new_exp)
+        # Phase 5c: 分配 (Num * (a±b) → Num*a ± Num*b)
+        if op == "*":
+            if isinstance(l, _CasNum) and isinstance(r, _CasBinOp) and r.op in ("+", "-"):
+                new_l = _cas_simplify(_CasBinOp("*", l, r.l))
+                new_r = _cas_simplify(_CasBinOp("*", l, r.r))
+                return _cas_simplify(_CasBinOp(r.op, new_l, new_r))
+            if isinstance(r, _CasNum) and isinstance(l, _CasBinOp) and l.op in ("+", "-"):
+                new_l = _cas_simplify(_CasBinOp("*", l.l, r))
+                new_r = _cas_simplify(_CasBinOp("*", l.r, r))
+                return _cas_simplify(_CasBinOp(l.op, new_l, new_r))
+        # Phase 5c: ネスト係数の畳み込み (c1 * (c2 * x) → (c1*c2) * x、両配置に対応)
+        if op == "*":
+            if isinstance(l, _CasNum) and isinstance(r, _CasBinOp) and r.op == "*":
+                if isinstance(r.l, _CasNum):
+                    return _cas_simplify(_CasBinOp("*",
+                                                    _CasBinOp("*", l, r.l), r.r))
+                if isinstance(r.r, _CasNum):
+                    return _cas_simplify(_CasBinOp("*",
+                                                    _CasBinOp("*", l, r.r), r.l))
+            if isinstance(r, _CasNum) and isinstance(l, _CasBinOp) and l.op == "*":
+                if isinstance(l.l, _CasNum):
+                    return _cas_simplify(_CasBinOp("*",
+                                                    _CasBinOp("*", l.l, r), l.r))
+                if isinstance(l.r, _CasNum):
+                    return _cas_simplify(_CasBinOp("*",
+                                                    _CasBinOp("*", l.r, r), l.l))
         # 乗算 × 分数の畳み込み: (a/b)*c → (a*c)/b、c*(a/b) → (c*a)/b
         if op == "*":
             if isinstance(l, _CasBinOp) and l.op == "/" and isinstance(r, _CasNum):
@@ -897,6 +1005,16 @@ def _cas_simplify(node):
             # 数値係数を前に: (non-Num) * Num → Num * (non-Num)
             if isinstance(r, _CasNum) and not isinstance(l, _CasNum):
                 return _CasBinOp("*", r, l)
+        # べき乗の単純化: x^0 → 1、x^1 → x
+        if op == "**":
+            if _is_num_eq(r, 0):
+                return _CasNum("1")
+            if _is_num_eq(r, 1):
+                return l
+            if _is_num_eq(l, 1):
+                return _CasNum("1")
+            if _is_num_eq(l, 0):
+                return _CasNum("0")
         return _CasBinOp(op, l, r)
     if isinstance(node, _CasCall):
         args = [_cas_simplify(a) for a in node.args]
