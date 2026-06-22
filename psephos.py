@@ -371,6 +371,7 @@ _CAS_CHAR_W = 16        # 8x8 framebuf font × 2x = 16 px / char
 _CAS_CHAR_H = 16
 _CAS_LINE_W = 2         # 分数バー・オーバーラインの太さ (px)
 _CAS_SQRT_W = 10        # √ グリフ全体の幅 (px)
+_CAS_GLYPH_SCALE = 2    # Greek 文字グリフ (16x16 source) のピクセル拡大率 → 32x32 出力
 
 
 # AST ノード型（クラスベース、メモリ最小化のため __slots__）
@@ -939,14 +940,24 @@ _GLYPH_MAP = {
 }
 
 
-def _draw_glyph(x, y, glyph, color):
-    """指定のグリフ (string tuple) を (x, y) から 16x16 で描画。"""
+def _draw_glyph(x, y, glyph, color, scale=1):
+    """指定のグリフ (string tuple) を (x, y) から描画。
+    scale=1 で 16x16、scale=2 で 32x32 (各ソースピクセル → scale×scale ブロック)。"""
     if not _HW:
         return
+    has_rect = hasattr(_display, "fill_rect")
     for py, row in enumerate(glyph):
         for px, c in enumerate(row):
-            if c != " ":
+            if c == " ":
+                continue
+            if scale == 1:
                 _display.pixel(x + px, y + py, color)
+            elif has_rect:
+                _display.fill_rect(x + px * scale, y + py * scale, scale, scale, color)
+            else:
+                for dy in range(scale):
+                    for dx in range(scale):
+                        _display.pixel(x + px * scale + dx, y + py * scale + dy, color)
 
 
 def _draw_text_small(x, y, s, color):
@@ -967,15 +978,15 @@ def _draw_text_small(x, y, s, color):
 
 
 def _cas_text_box(s):
-    """通常サイズ (16x16) の文字列 box。`pi` 等はグリフへ置換。"""
+    """CAS 文字列 box。Greek 名 ('pi' 等) は 32x32 グリフ、通常テキストは 16x16。"""
     # 名前がシンボルマップにあればグリフ描画 (例: 'pi' → π)
     if s in _GLYPH_MAP:
         glyph = _GLYPH_MAP[s]
-        w = 16
-        h = 16
+        w = 16 * _CAS_GLYPH_SCALE       # 32 px (テキストより大きい)
+        h = 16 * _CAS_GLYPH_SCALE
         bl = h // 2
         def draw(x, y, color):
-            _draw_glyph(x, y, glyph, color)
+            _draw_glyph(x, y, glyph, color, scale=_CAS_GLYPH_SCALE)
         return _CasBox(w, h, bl, draw)
     w = len(s) * _CAS_CHAR_W
     h = _CAS_CHAR_H
@@ -2104,6 +2115,14 @@ def render(history, buf, cursor, message=""):
 # ---- メインループ --------------------------------------------------------
 
 def main():
+    # 前回フリーズ等で残った大量メモリ (chrome_buf / framebuf / closure 等) を回収
+    # ランチャ経由 exec(...) の前に動作した Python オブジェクトは sys.modules や
+    # script_globals 由来でリークが残ることが実機で確認されている (2026-06-22)
+    try:
+        import gc as _gc
+        _gc.collect()
+    except Exception:
+        pass
     try:
         _main_run()
     finally:
