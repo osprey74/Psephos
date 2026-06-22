@@ -168,7 +168,65 @@ LofiFren の `picocalcdisplay.drawTxt6x8` はハードウェア（C 実装）で
 - framebuf 一時確保なし → メモリ断片化への寄与を完全排除
 - ピクセル走査回数を 1/8 に（バイト単位で読み bit シフトのため）
 
-ただしメモリ断片化の **根本原因（chrome.bin 51KB）には触れない**。Phase 6-A と組み合わせて初めて完成。
+---
+
+## 2.5 Phase 6-C: chrome.bin 廃止して動的描画（最大効果）
+
+### 目的
+
+**chrome.bin (51,200 byte の連続領域確保) を完全に廃止**し、起動毎に `hline` + プリベイク bitmap フォントで chrome を描き直す。これがメモリ断片化問題の根本解決。
+
+### 設計
+
+chrome.bin の内容は実質：
+
+- 上部 17 px：水平線（ACC 色、上端 1 px）+ "PSEPHOS - programmable scientific calculator" テキスト + 水平線（ACC 色、下端）
+- 下部 4 px：水平線 1 本（ACC 色、下端 2 px）
+- 中央 299 px：全て BG（黒）
+
+すべて Python 側で表現可能：
+
+```python
+def _draw_chrome():
+    if not _HW:
+        return
+    # 上部: 水平線 + テキスト + 水平線
+    _display.hline(0, 0, SCREEN_W, COL_ACC)              # 上端
+    _draw_text_8x8(2, 4, "PSEPHOS", COL_ACC)             # 56 px wide
+    _draw_text_8x8(58, 4, " - programmable", COL_FG)
+    _draw_text_8x8(58 + 15*8, 4, " sci calc", COL_FG)    # 行末調整
+    _display.hline(0, 15, SCREEN_W, COL_ACC)             # テキスト下
+    # 下部: 水平線
+    _display.hline(0, SCREEN_H - 2, SCREEN_W, COL_ACC)
+```
+
+- 上記コード自体は 20〜30 行で済む
+- データ量増加は **0 byte**（フォントは Phase 6-B で既にロード済）
+- テーマ切替は `COL_ACC` / `COL_FG` の参照だけで済む（パレット計算不要）
+
+### 効果
+
+- 起動毎の `bytearray(51200)` 確保が消える → **断片化の最大原因が消える**
+- SD I/O が初期化時と help 終了時に発生していたが不要に → 起動高速化
+- `_maybe_load_chrome` / `_redraw_chrome` / `_chrome_buf` 周辺コードを大幅削除可能
+- chrome.png / chrome.bin / 関連 design handoff は「将来オプション」として残しておく
+
+### help 画像との関係
+
+ヘルプ画面は日本語が含まれるため、引き続き PNG / bin 方式（`psephos_help_p1.bin` / `_p2.bin`）で運用。ただし：
+
+- help コマンド実行時のみ 51 KB 確保 → help 終了時に即解放（gc.collect）
+- 単発確保なので、chrome.bin と違い「常駐し続けて断片化を悪化させる」ことはない
+- 日本語フォントをいずれ実装すれば、help も動的描画化可能（将来課題）
+
+### Phase 6-C の課題
+
+- "PSEPHOS - programmable scientific calculator" 全文を 8×8 = 8 px × 44 文字 = 352 px で書くと 320 px に収まらない。短縮形 or 6×6 用意 or 7×6 圧縮版が必要：
+  - 案 1: `"PSEPHOS - prog. scientific calculator"` 短縮（41 文字 × 8 = 328、まだ超過）
+  - 案 2: 6×8 フォントを別途プリベイクしてヘッダ専用に使う
+  - 案 3: PSEPHOS + ロゴアイコン的な絵文字 + 短いサブタイトル
+  - 案 4: 上部 17 px を 24 px に拡げて 16×16 フォントで "PSEPHOS" だけ大きく
+- 既存 chrome.png のレイアウト感を踏襲するかは要検討（claude_design_handoff_chrome.md 参照）
 
 ---
 
@@ -185,9 +243,14 @@ LofiFren の `picocalcdisplay.drawTxt6x8` はハードウェア（C 実装）で
    - 共有 tmp framebuf は不要になるので削除
    - 動作確認：表示は変わらず、複雑式の描画が体感で速くなっているか
 
-3. **Phase 5: plot 実装の復元** — 2026-06-22 セッションで `git stash@{0}` に避難済の plot 実装を取り出して適用
+3. **Phase 6-C: chrome.bin 廃止 + 動的描画** — フォント実装に依存するため Phase 6-B の直後
+   - `_draw_chrome()` を新設し、`_maybe_load_chrome` / `_redraw_chrome` を置換
+   - chrome 用ヘッダ文字列のレイアウト（320 px 内に収める）を確定
+   - 動作確認：chrome.bin を SD から消しても起動できる、テーマ切替で色が追随する
+
+4. **Phase 5: plot 実装の復元** — 2026-06-22 セッションで `git stash@{0}` に避難済の plot 実装を取り出して適用
    - `git stash pop stash@{0}` で復元
-   - Phase 6-A/B 上に重ねて動作確認
+   - Phase 6-A/B/C 上に重ねて動作確認
 
 ---
 
