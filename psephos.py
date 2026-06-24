@@ -39,14 +39,14 @@ ROWS = SCREEN_H // CHAR_H      # 40
 HISTORY_LEFT_PX = 7                          # 履歴の左余白 (px)
 HISTORY_RIGHT_PX = 7                         # 履歴の右余白 (px、左と対称)
 HISTORY_COLS = (SCREEN_W - HISTORY_LEFT_PX - HISTORY_RIGHT_PX) // CHAR_W   # = 51
-# 入力行は `_draw_text_2x()` で 2 倍描画する。framebuf.text の組み込みフォントは 8x8
-# (PicoCalc の drawTxt6x8 とは別物) なので、ベースを 8x8 として計算する。
-INPUT_SCALE = 2                              # 入力行の拡大率
-INPUT_BASE_W = 8                             # framebuf.text の組み込みフォント幅
-INPUT_BASE_H = 8                             # framebuf.text の組み込みフォント高
-INPUT_CHAR_W = INPUT_BASE_W * INPUT_SCALE    # 16 px / char
-INPUT_CHAR_H = INPUT_BASE_H * INPUT_SCALE    # 16 px / char
-INPUT_COLS = SCREEN_W // INPUT_CHAR_W        # 320 / 16 = 20 cols
+# 入力行は Phase 6-B step 2b で Terminus 12x24 に切替。
+# 旧 _draw_text_2x (8x8 → 2x scale) 用の定数は履歴を残すためにコメント保持。
+INPUT_SCALE = 2                              # (旧) 入力行の拡大率、Terminus 切替で未使用
+INPUT_BASE_W = 8                             # (旧) framebuf.text 組み込みフォント幅
+INPUT_BASE_H = 8                             # (旧) framebuf.text 組み込みフォント高
+INPUT_CHAR_W = 12                            # Terminus 12x24 の文字幅
+INPUT_CHAR_H = 24                            # Terminus 12x24 の文字高
+INPUT_COLS = SCREEN_W // INPUT_CHAR_W        # 320 / 12 = 26 cols
 
 INPUT_TOP_PAD = 5                            # 入力行とメッセージ行の間の余白 (px, 区切り線 + 上下 2px ずつ)
 INPUT_BOTTOM_PAD = 2                         # 入力行と chrome 下端領域 (4px) の間の余白 (px)
@@ -2120,9 +2120,9 @@ def render(history, buf, cursor, message=""):
     # カーソルが visible 範囲に収まるようシフト量を決定。カーソル論理列 = len(prefix)+cursor
     shift = max(0, len(prefix) + cursor - (visible_cols - 1))
     prompt = full[shift:shift + visible_cols]
-    _draw_text_2x(0, _INPUT_Y, prompt, COL_FG)
+    _draw_text_p1(0, _INPUT_Y, prompt, COL_FG)
 
-    # --- カーソル下線 (アクセント色、2x スケールに合わせて 16 px 幅・下端 2 px) ---
+    # --- カーソル下線 (アクセント色、Terminus 12x24 に合わせて 12 px 幅・下端 2 px) ---
     cx_chars = len(prefix) + cursor - shift
     if 0 <= cx_chars < visible_cols and hasattr(_display, "fill_rect"):
         cx = cx_chars * INPUT_CHAR_W
