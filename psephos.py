@@ -992,9 +992,10 @@ def _get_font(name):
     return cached
 
 
-def _draw_text_bm(x, y, s, color, font_name):
+def _draw_text_bm(x, y, s, color, font_name, scale=1):
     """ビットマップフォントで文字列を描画。MSB-first パック前提。
-    1 文字あたり W ピクセル進める (連結時の隙間は font に依存)。"""
+    scale=1 で等倍、scale=2 で 2 倍スケール (各ソースピクセルを scale×scale ブロックに展開)。
+    1 文字あたり W*scale ピクセル進める。"""
     if not _HW or not s:
         return
     f = _get_font(font_name)
@@ -1002,6 +1003,7 @@ def _draw_text_bm(x, y, s, color, font_name):
         return
     font, w, h = f
     bpr = (w + 7) // 8
+    has_rect = hasattr(_display, "fill_rect")
     cx = x
     for ch in s:
         code = ord(ch)
@@ -1011,8 +1013,15 @@ def _draw_text_bm(x, y, s, color, font_name):
                 base = row * bpr
                 for col in range(w):
                     if data[base + (col >> 3)] & (0x80 >> (col & 7)):
-                        _display.pixel(cx + col, y + row, color)
-        cx += w
+                        if scale == 1:
+                            _display.pixel(cx + col, y + row, color)
+                        elif has_rect:
+                            _display.fill_rect(cx + col * scale, y + row * scale, scale, scale, color)
+                        else:
+                            for dy in range(scale):
+                                for dx in range(scale):
+                                    _display.pixel(cx + col * scale + dx, y + row * scale + dy, color)
+        cx += w * scale
 
 
 def _draw_text_p1(x, y, s, color=None):
@@ -1030,10 +1039,12 @@ def _draw_text_p2(x, y, s, color=None):
 
 
 def _draw_text_p3(x, y, s, color=None):
-    """Pattern 3: big_calc 結果行 (Terminus 16x32)、強調表示用。"""
+    """Pattern 3: big_calc 結果行 — Terminus 12x24 を 2× スケール (実効 24x48) で強調表示。
+    Terminus 16x32 source は padding が大きく視覚的に大きくならないため、12x24 を 2x して
+    確実に大きく見せる戦略を採用。"""
     if color is None:
         color = COL_FG
-    _draw_text_bm(x, y, s, color, _FONT_P3_NAME)
+    _draw_text_bm(x, y, s, color, _FONT_P1_NAME, scale=2)
 
 
 # 各 Pattern の文字サイズ定数 (レイアウト計算用)
@@ -1041,8 +1052,8 @@ P1_W = 12
 P1_H = 24
 P2_W = 8
 P2_H = 16
-P3_W = 16
-P3_H = 32
+P3_W = 24       # Terminus 12x24 を 2× スケールした実効幅
+P3_H = 48       # Terminus 12x24 を 2× スケールした実効高
 
 
 def _draw_text_small(x, y, s, color):
@@ -1666,7 +1677,7 @@ def _show_big_calc(expr_str, res_str):
     if not _HW:
         print(expr_str + (" = " + res_str if res_str is not None else "  (symbolic)"))
         return
-    max_cols = SCREEN_W // _CAS_CHAR_W
+    max_cols = SCREEN_W // _CAS_CHAR_W       # 12px = 26 chars
 
     def _trunc(s):
         return s if len(s) <= max_cols else s[:max_cols - 1] + "~"
@@ -1716,6 +1727,7 @@ def _show_big_calc(expr_str, res_str):
         lines.append((b.h, b.w,
                       lambda x, y, box=b: box.render(x, y, COL_FG)))
     if eq_disp is not None:
+        # 結果行は Pattern 1 (Terminus 12x24, ACC 色) で symbolic との一貫性を保つ
         lines.append((_CAS_CHAR_H, len(eq_disp) * _CAS_CHAR_W,
                       lambda x, y, s=eq_disp: _draw_text_p1(x, y, s, COL_ACC)))
     if line_box_simp is not None:
