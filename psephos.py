@@ -2406,6 +2406,12 @@ def _main_run():
             except Exception as ex:
                 _diag("EX " + str(ex)[:60])
                 message = "Error: " + str(ex)[:COLS - 8]
+            # 評価サイクル後に必ず GC して CAS layout の closure / framebuf 残骸を回収
+            try:
+                import gc as _gc
+                _gc.collect()
+            except Exception:
+                pass
             buf = ""
             cursor = 0
             render(history, buf, cursor, message)
