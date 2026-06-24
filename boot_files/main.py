@@ -62,6 +62,33 @@ if _fallback:
         sys.print_exception(e)
 else:
     # Psephos を起動
+    # SD マウント確認: /sd の statvfs サイズで判定 (内蔵フラッシュなら 2 MB、SD なら 数 GB)
+    # マウント未完なら enhanced_sd.initsd() で再マウントを 3 回まで試す
+    import os as _os
+    sd_ok = False
+    for _attempt in range(3):
+        try:
+            _sv = _os.statvfs("/sd")
+            _mb = (_sv[0] * _sv[2]) // (1024 * 1024)
+            if _mb >= 100:           # SD カードは 100 MB 以上、内蔵フラッシュは 2 MB
+                sd_ok = True
+                break
+        except OSError:
+            pass
+        # マウント試行
+        try:
+            from enhanced_sd import initsd
+            initsd(debug=False)
+        except Exception:
+            pass
+        time.sleep_ms(300)
+    if not sd_ok:
+        try:
+            picocalc.terminal.wr("\r\n[main.py] SD card mount failed. REPL accessible.\r\n")
+        except Exception:
+            pass
+        # 中断 (REPL 残す)
+        raise SystemExit()
     sys.path.insert(0, "/sd/py_scripts")
     gc.collect()
     _ok = False

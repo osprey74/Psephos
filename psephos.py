@@ -1979,20 +1979,20 @@ def _maybe_load_chrome():
 
 
 def _redraw_chrome():
-    """Chrome を動的描画 (hline + ハードウェア 6x8 フォント)。
-    Phase 6-B 段階では Terminus 12x24 フォント import を避け、軽量な
-    drawTxt6x8 でタイトルを描画する。Phase 6-B 後半で _draw_text_p1 に切替予定。"""
+    """Chrome を動的描画 (hline + Terminus 12x24 ビットマップフォント)。
+    Phase 6-B step 2a: Pattern 1 (chrome ヘッダ) を Terminus 12x24 に切替。
+    初回呼出時に terminus_12x24 モジュール (~20 KB) を遅延ロード。"""
     if not _HW:
         return
     # 上部
     if hasattr(_display, "hline"):
         _display.hline(0, 0, SCREEN_W, COL_ACC)
         _display.hline(0, CHROME_TOP_H - 1, SCREEN_W, COL_ACC)
-    # タイトル (6x8 ハードウェア、ACC 色) — 上 hline と下 hline の間に配置
-    title_y = (CHROME_TOP_H - 8) // 2   # 中央寄せ (6x8 のため H=8)
+    # タイトル (Terminus 12x24、ACC 色) — 上 hline と下 hline の間に中央寄せ
+    title_y = (CHROME_TOP_H - P1_H) // 2 + 1
     if title_y < 1:
         title_y = 1
-    _display.text(CHROME_TITLE, 4, title_y, COL_ACC)
+    _draw_text_p1(4, title_y, CHROME_TITLE, COL_ACC)
     # 下部 (水平線 1 本のみ、screen 最下端から 2px 上)
     if hasattr(_display, "hline"):
         _display.hline(0, SCREEN_H - 2, SCREEN_W, COL_ACC)
