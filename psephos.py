@@ -26,13 +26,13 @@ except Exception:
     _display = None
     _HW = False
 
-# 画面・フォント定数 (zenodante ドライバの 6x8 フォント前提)
+# 画面・フォント定数 (Phase 6-B step 2d: Terminus 8x16 を _draw_text のベースとして採用)
 SCREEN_W = 320
 SCREEN_H = 320
-CHAR_W = 6
-CHAR_H = 8
-COLS = SCREEN_W // CHAR_W      # 53
-ROWS = SCREEN_H // CHAR_H      # 40
+CHAR_W = 8                       # Terminus 8x16 文字幅 (旧 6)
+CHAR_H = 16                      # Terminus 8x16 文字高 (旧 8)
+COLS = SCREEN_W // CHAR_W      # 40 (旧 53)
+ROWS = SCREEN_H // CHAR_H      # 20 (旧 40)
 
 # レイアウト (chrome 画像非装着時の既定値 = 全画面利用)
 # chrome.bin がある場合は _maybe_load_chrome() がこれらを書き換える。
@@ -1046,20 +1046,10 @@ P3_H = 32
 
 
 def _draw_text_small(x, y, s, color):
-    """8x8 framebuf 組み込みフォントを 1x スケールで描画 (指数用)。"""
+    """CAS 指数等の小サイズ描画 (Terminus 8x16)。Pattern 2 と同じフォント。"""
     if not _HW or not s:
         return
-    import framebuf
-    str_w = len(s) * 8
-    pad_w = ((str_w + 7) // 8) * 8
-    buf = bytearray((pad_w * 8) // 8)
-    tmp = framebuf.FrameBuffer(buf, pad_w, 8, framebuf.MONO_HMSB)
-    tmp.fill(0)
-    tmp.text(s, 0, 0, 1)
-    for py in range(8):
-        for px in range(str_w):
-            if tmp.pixel(px, py):
-                _display.pixel(x + px, y + py, color)
+    _draw_text_p2(x, y, s, color)
 
 
 def _cas_text_box(s):
@@ -1082,9 +1072,9 @@ def _cas_text_box(s):
 
 
 def _cas_text_small_box(s):
-    """小サイズ (8x8) の文字列 box (指数用)。"""
+    """小サイズ (Terminus 8x16) の文字列 box (指数用、Pattern 2)。"""
     w = len(s) * 8
-    h = 8
+    h = 16
     bl = h // 2
     def draw(x, y, color):
         _draw_text_small(x, y, s, color)
@@ -1899,10 +1889,10 @@ def _read_key():
 # ---- 描画 ----------------------------------------------------------------
 
 def _draw_text(x, y, s, color=COL_FG):
+    """Phase 6-B step 2d: 履歴・ヘルプ・メッセージ用に Terminus 8x16 を使う。
+    旧 6x8 hardware drawTxt6x8 は使わず、_draw_text_p2 にリダイレクト。"""
     if _HW:
-        _display.text(s, x, y, color)
-    else:
-        pass  # PC フォールバックでは描画しない
+        _draw_text_p2(x, y, s, color)
 
 
 def _draw_text_2x(x, y, s, color=COL_FG):
@@ -2083,6 +2073,45 @@ def _show_help():
         break
 
 
+def _render_input_only(buf, cursor, message=""):
+    """入力行 + カーソル + メッセージのみ更新 (履歴は触らない)。
+    キー入力毎の高速更新用 (Phase 6-B step 2d 以降、フル render は重いため)。"""
+    if not _HW:
+        return
+    if hasattr(_display, "beginDraw"):
+        _display.beginDraw()
+    # 入力行領域 + メッセージ領域だけクリア
+    # メッセージ行: y = _MESSAGE_Y, 高さ CHAR_H
+    # 区切り線:    y = _INPUT_Y - 3
+    # 入力行:      y = _INPUT_Y, 高さ INPUT_CHAR_H
+    # カーソル下線: y = _INPUT_Y + INPUT_CHAR_H - 2
+    clear_y = _MESSAGE_Y
+    clear_h = _ACTIVE_BOTTOM - clear_y
+    if hasattr(_display, "fill_rect"):
+        _display.fill_rect(0, clear_y, SCREEN_W, clear_h, COL_BG)
+    # 区切り線
+    if hasattr(_display, "hline"):
+        _display.hline(0, _INPUT_Y - 3, SCREEN_W, COL_DIM)
+    # 入力行
+    prefix = "> "
+    full = prefix + buf
+    visible_cols = INPUT_COLS - 1
+    shift = max(0, len(prefix) + cursor - (visible_cols - 1))
+    prompt = full[shift:shift + visible_cols]
+    _draw_text_p1(0, _INPUT_Y, prompt, COL_FG)
+    # カーソル下線
+    cx_chars = len(prefix) + cursor - shift
+    if 0 <= cx_chars < visible_cols and hasattr(_display, "fill_rect"):
+        cx = cx_chars * INPUT_CHAR_W
+        cy = _INPUT_Y + INPUT_CHAR_H - 2
+        _display.fill_rect(cx, cy, INPUT_CHAR_W, 2, COL_ACC)
+    # メッセージ
+    if message:
+        msg = message[:COLS]
+        _draw_text(0, _MESSAGE_Y, msg, COL_ACC)
+    _show()
+
+
 def render(history, buf, cursor, message=""):
     """履歴域 + 入力行を描画。cursor は buf 内のカーソル位置 (0 〜 len(buf))。"""
     if not _HW:
@@ -2092,6 +2121,11 @@ def render(history, buf, cursor, message=""):
         shown = buf[:cursor] + "|" + buf[cursor:]
         print("> " + shown + ("   [" + message + "]" if message else ""))
         return
+
+    # Core1 リフレッシュをブロック (描画中の部分状態が画面に出るのを防止)
+    # 終了時の _show() で resume される (snake.py 等の標準パターン)
+    if hasattr(_display, "beginDraw"):
+        _display.beginDraw()
 
     # 動的領域のみクリア (chrome 装着時は chrome を消さない)
     _clear_active()
@@ -2112,11 +2146,11 @@ def render(history, buf, cursor, message=""):
     if hasattr(_display, "hline"):
         _display.hline(0, _INPUT_Y - 3, SCREEN_W, COL_DIM)
 
-    # --- 入力行 (2x スケール、カーソル位置を見せるためのスクロール) ---
+    # --- 入力行 (Terminus 12x24、カーソル位置を見せるためのスクロール) ---
     # 画面端から 1 文字分のマージンを確保 (INPUT_COLS - 1 列が実効表示幅)
     prefix = "> "
     full = prefix + buf
-    visible_cols = INPUT_COLS - 1                    # 19 cols 実効幅
+    visible_cols = INPUT_COLS - 1
     # カーソルが visible 範囲に収まるようシフト量を決定。カーソル論理列 = len(prefix)+cursor
     shift = max(0, len(prefix) + cursor - (visible_cols - 1))
     prompt = full[shift:shift + visible_cols]
@@ -2263,7 +2297,7 @@ def _main_run():
                         hist_idx -= 1
                     buf = _load_hist(hist_idx)
                     cursor = len(buf)
-                    render(history, buf, cursor, message)
+                    _render_input_only(buf, cursor, message)
             elif seq == b"[B":        # ↓: 新しい履歴 or 編集中バッファ復元
                 if hist_idx != -1:
                     if hist_idx < len(history.items) - 1:
@@ -2274,23 +2308,23 @@ def _main_run():
                         hist_idx = -1
                         buf = saved_buf
                         cursor = saved_cursor
-                    render(history, buf, cursor, message)
+                    _render_input_only(buf, cursor, message)
             elif seq == b"[D":        # ←: カーソル左
                 if cursor > 0:
                     cursor -= 1
-                    render(history, buf, cursor, message)
+                    _render_input_only(buf, cursor, message)
             elif seq == b"[C":        # →: カーソル右
                 if cursor < len(buf):
                     cursor += 1
-                    render(history, buf, cursor, message)
+                    _render_input_only(buf, cursor, message)
             elif seq == b"[H":        # Home: 行頭
                 if cursor != 0:
                     cursor = 0
-                    render(history, buf, cursor, message)
+                    _render_input_only(buf, cursor, message)
             elif seq == b"[F":        # End: 行末
                 if cursor != len(buf):
                     cursor = len(buf)
-                    render(history, buf, cursor, message)
+                    _render_input_only(buf, cursor, message)
             # その他のシーケンス (Shift+矢印, Delete 等) は無視
             continue
 
@@ -2421,7 +2455,7 @@ def _main_run():
             if cursor > 0:
                 buf = buf[:cursor - 1] + buf[cursor:]
                 cursor -= 1
-                render(history, buf, cursor, message)
+                _render_input_only(buf, cursor, message)
             continue
 
         # 通常文字 (印字可能のみ受理) -- カーソル位置に挿入
@@ -2429,7 +2463,7 @@ def _main_run():
             buf = buf[:cursor] + key + buf[cursor:]
             cursor += 1
             _diag("Lchar_before_render buf=" + repr(buf)[:30])
-            render(history, buf, cursor, message)
+            _render_input_only(buf, cursor, message)
             _diag("Lchar_after_render")
 
 
