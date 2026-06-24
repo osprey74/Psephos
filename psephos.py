@@ -367,8 +367,8 @@ def evaluate(expr):
 # 記号簡約は Tier 2 で別途。Tier 1 はそのままの式を視覚化するのみ。
 
 # CAS レンダリング寸法 (2x スケール)
-_CAS_CHAR_W = 16        # 8x8 framebuf font × 2x = 16 px / char
-_CAS_CHAR_H = 16
+_CAS_CHAR_W = 12        # Terminus 12x24 文字幅 (Phase 6-B step 2c)
+_CAS_CHAR_H = 24        # Terminus 12x24 文字高
 _CAS_LINE_W = 2         # 分数バー・オーバーラインの太さ (px)
 _CAS_SQRT_W = 10        # √ グリフ全体の幅 (px)
 _CAS_GLYPH_SCALE = 2    # Greek 文字グリフ (16x16 source) のピクセル拡大率 → 32x32 出力
@@ -1077,7 +1077,7 @@ def _cas_text_box(s):
     h = _CAS_CHAR_H
     bl = _CAS_CHAR_H // 2
     def draw(x, y, color):
-        _draw_text_2x(x, y, s, color)
+        _draw_text_p1(x, y, s, color)
     return _CasBox(w, h, bl, draw)
 
 
@@ -1101,7 +1101,7 @@ def _cas_layout(node):
         xb = _cas_layout_with_paren(node.x, 4, is_right=False, outer_op=node.op)
         op = node.op
         def draw(x, y, color):
-            _draw_text_2x(x, y + xb.baseline - _CAS_CHAR_H // 2, op, color)
+            _draw_text_p1(x, y + xb.baseline - _CAS_CHAR_H // 2, op, color)
             xb.render(x + _CAS_CHAR_W, y, color)
         return _CasBox(_CAS_CHAR_W + xb.w, xb.h, xb.baseline, draw)
     if isinstance(node, _CasBinOp):
@@ -1150,9 +1150,9 @@ def _cas_paren_box(inner):
     bl = max(inner.baseline, paren_h // 2)
     w = paren_w + inner.w + paren_w
     def draw(x, y, color):
-        _draw_text_2x(x, y + bl - paren_h // 2, "(", color)
+        _draw_text_p1(x, y + bl - paren_h // 2, "(", color)
         inner.render(x + paren_w, y + bl - inner.baseline, color)
-        _draw_text_2x(x + paren_w + inner.w, y + bl - paren_h // 2, ")", color)
+        _draw_text_p1(x + paren_w + inner.w, y + bl - paren_h // 2, ")", color)
     return _CasBox(w, h, bl, draw)
 
 
@@ -1198,7 +1198,7 @@ def _cas_layout_binop_inline(op, l, r):
     w = lb.w + op_w + rb.w
     def draw(x, y, color):
         lb.render(x, y + above - lb.baseline, color)
-        _draw_text_2x(x + lb.w, y + above - _CAS_CHAR_H // 2, op_text, color)
+        _draw_text_p1(x + lb.w, y + above - _CAS_CHAR_H // 2, op_text, color)
         rb.render(x + lb.w + op_w, y + above - rb.baseline, color)
     return _CasBox(w, h, bl, draw)
 
@@ -1312,15 +1312,15 @@ def _cas_layout_call(name, args):
     h = above + below
     bl = above
     def draw(x, y, color):
-        _draw_text_2x(x, y + above - _CAS_CHAR_H // 2, name + "(", color)
+        _draw_text_p1(x, y + above - _CAS_CHAR_H // 2, name + "(", color)
         cx = x + name_w + paren_w
         for i, ab in enumerate(arg_boxes):
             if i > 0:
-                _draw_text_2x(cx, y + above - _CAS_CHAR_H // 2, ", ", color)
+                _draw_text_p1(cx, y + above - _CAS_CHAR_H // 2, ", ", color)
                 cx += sep_w
             ab.render(cx, y + above - ab.baseline, color)
             cx += ab.w
-        _draw_text_2x(cx, y + above - _CAS_CHAR_H // 2, ")", color)
+        _draw_text_p1(cx, y + above - _CAS_CHAR_H // 2, ")", color)
     return _CasBox(w, h, bl, draw)
 
 
@@ -1720,14 +1720,14 @@ def _show_big_calc(expr_str, res_str):
     # 各行 (height, width, draw(x, y)) のリストを構築
     lines = []
     lines.append((_CAS_CHAR_H, len(expr_disp) * _CAS_CHAR_W,
-                  lambda x, y, s=expr_disp: _draw_text_2x(x, y, s, COL_FG)))
+                  lambda x, y, s=expr_disp: _draw_text_p1(x, y, s, COL_FG)))
     if line_box is not None:
         b = line_box
         lines.append((b.h, b.w,
                       lambda x, y, box=b: box.render(x, y, COL_FG)))
     if eq_disp is not None:
         lines.append((_CAS_CHAR_H, len(eq_disp) * _CAS_CHAR_W,
-                      lambda x, y, s=eq_disp: _draw_text_2x(x, y, s, COL_ACC)))
+                      lambda x, y, s=eq_disp: _draw_text_p1(x, y, s, COL_ACC)))
     if line_box_simp is not None:
         b = line_box_simp
         lines.append((b.h, b.w,
