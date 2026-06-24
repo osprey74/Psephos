@@ -960,6 +960,91 @@ def _draw_glyph(x, y, glyph, color, scale=1):
                         _display.pixel(x + px * scale + dx, y + py * scale + dy, color)
 
 
+# === Phase 6-B: ビットマップフォント (Terminus) ===
+# 3 種類の Terminus フォントを遅延ロードして使い分ける:
+#   - Pattern 1 (12x24): chrome ヘッダ / 入力欄 / CAS 数式テキスト
+#   - Pattern 2 (8x16):  計算履歴 / CAS 指数 / ヘルプ本文 / メッセージ
+#   - Pattern 3 (16x32): big_calc 結果行 (大きく強調)
+# 各フォントモジュールは `/sd/py_scripts/terminus_*.py` に存在し、
+# `FONT` (95 要素 tuple of bytes), `W`, `H` を export する。
+
+_FONT_CACHE = {}
+
+_FONT_P1_NAME = "terminus_12x24"
+_FONT_P2_NAME = "terminus_8x16"
+_FONT_P3_NAME = "terminus_16x32"
+
+
+def _get_font(name):
+    """フォントモジュールを遅延ロード + キャッシュ。戻り値: (FONT, W, H) or None。
+    PC フォールバック (`_HW=False`) や読み込み失敗時は None を返す。"""
+    cached = _FONT_CACHE.get(name)
+    if cached is not None:
+        return cached
+    if not _HW:
+        return None
+    try:
+        mod = __import__(name)
+        cached = (mod.FONT, mod.W, mod.H)
+        _FONT_CACHE[name] = cached
+    except Exception:
+        return None
+    return cached
+
+
+def _draw_text_bm(x, y, s, color, font_name):
+    """ビットマップフォントで文字列を描画。MSB-first パック前提。
+    1 文字あたり W ピクセル進める (連結時の隙間は font に依存)。"""
+    if not _HW or not s:
+        return
+    f = _get_font(font_name)
+    if f is None:
+        return
+    font, w, h = f
+    bpr = (w + 7) // 8
+    cx = x
+    for ch in s:
+        code = ord(ch)
+        if 0x20 <= code <= 0x7E:
+            data = font[code - 0x20]
+            for row in range(h):
+                base = row * bpr
+                for col in range(w):
+                    if data[base + (col >> 3)] & (0x80 >> (col & 7)):
+                        _display.pixel(cx + col, y + row, color)
+        cx += w
+
+
+def _draw_text_p1(x, y, s, color=None):
+    """Pattern 1: chrome / input / CAS テキスト (Terminus 12x24)。"""
+    if color is None:
+        color = COL_FG
+    _draw_text_bm(x, y, s, color, _FONT_P1_NAME)
+
+
+def _draw_text_p2(x, y, s, color=None):
+    """Pattern 2: 履歴 / 指数 / ヘルプ / メッセージ (Terminus 8x16)。"""
+    if color is None:
+        color = COL_FG
+    _draw_text_bm(x, y, s, color, _FONT_P2_NAME)
+
+
+def _draw_text_p3(x, y, s, color=None):
+    """Pattern 3: big_calc 結果行 (Terminus 16x32)、強調表示用。"""
+    if color is None:
+        color = COL_FG
+    _draw_text_bm(x, y, s, color, _FONT_P3_NAME)
+
+
+# 各 Pattern の文字サイズ定数 (レイアウト計算用)
+P1_W = 12
+P1_H = 24
+P2_W = 8
+P2_H = 16
+P3_W = 16
+P3_H = 32
+
+
 def _draw_text_small(x, y, s, color):
     """8x8 framebuf 組み込みフォントを 1x スケールで描画 (指数用)。"""
     if not _HW or not s:
@@ -1587,6 +1672,7 @@ def _show_big_calc(expr_str, res_str):
     `res_str` に None を渡すと「symbolic-only モード」になり Line 3 を省略する
     (eval が NameError で失敗したケース)。
     """
+    _diag("BC0 enter")
     if not _HW:
         print(expr_str + (" = " + res_str if res_str is not None else "  (symbolic)"))
         return
@@ -1606,6 +1692,7 @@ def _show_big_calc(expr_str, res_str):
         simplified = _cas_simplify(node)
     except Exception:
         pass
+    _diag("BC1 parsed/simplified")
 
     line_box = None
     line_box_simp = None
@@ -1650,6 +1737,7 @@ def _show_big_calc(expr_str, res_str):
     total_h = sum(h for h, _w, _d in lines) + gap * (len(lines) - 1)
     avail = _ACTIVE_BOTTOM - _ACTIVE_TOP
     top_y = _ACTIVE_TOP + max(0, (avail - total_h) // 2)
+    _diag("BC2 lines=" + str(len(lines)))
 
     _clear_active()
     y = top_y
@@ -1657,10 +1745,11 @@ def _show_big_calc(expr_str, res_str):
         x = max(0, (SCREEN_W - w) // 2)
         try:
             draw_fn(x, y)
-        except Exception:
-            pass
+        except Exception as _ex:
+            _diag("BC_drawerr " + str(i) + " " + str(_ex)[:40])
         y += h + gap
     _show()
+    _diag("BC3 shown, waiting key")
     while True:
         k = _read_key()
         if isinstance(k, tuple):
@@ -1866,195 +1955,131 @@ def _show():
             pass
 
 
+# === Phase 6-C: chrome.bin 廃止 + 動的描画 ===
+# 旧来は /sd/psephos_chrome.bin (51,200 byte) を framebuf に load して blit していたが、
+# 51 KB の連続領域確保がメモリ断片化の最大原因だったため、hline + Terminus 12x24 で
+# 動的描画する方式に置換。chrome 画像も _chrome_buf も不要になり、free_chrome も no-op。
+# テーマ切替時は COL_ACC/COL_FG 参照だけで色が追随する。
+
+CHROME_TOP_H = 28          # 上部 chrome 高さ (hline 1 + 余白 + 12x24 テキスト 24 + 余白 + hline 1)
+CHROME_BOTTOM_H = 4        # 下部 chrome 高さ (余白 + hline 2)
+CHROME_TITLE = "PSEPHOS - prog sci calc"   # 22 chars × 12 = 264 px (320 内に収まる)
+
+
 def _maybe_load_chrome():
-    """`CHROME_IMG_PATH` が存在すれば chrome 画像を読み込みレイアウトを再計算。
-    存在しない場合は何もしない（全画面動作のまま）。"""
-    global _chrome_buf
+    """旧 API 互換のためのスタブ。Phase 6-C 以降は描画は _redraw_chrome() に集約。
+    レイアウト定数だけは chrome 装着想定値に書き換える (常時 chrome あり扱い)。"""
     global _ACTIVE_TOP, _ACTIVE_BOTTOM, _HISTORY_Y0, _HISTORY_ROWS, _MESSAGE_Y, _INPUT_Y
-    if not _HW:
-        return
-    try:
-        import framebuf
-    except ImportError:
-        return
-    buf = bytearray(CHROME_BYTES)
-    try:
-        with open(CHROME_IMG_PATH, "rb") as f:
-            n = f.readinto(buf)
-        if n != CHROME_BYTES:
-            return
-    except OSError:
-        return
-    _chrome_buf = (buf, framebuf.FrameBuffer(buf, SCREEN_W, SCREEN_H, framebuf.GS4_HMSB))
-    # レイアウトを chrome 対応値に更新
-    _ACTIVE_TOP = CHROME_TOP_DEFAULT_H
-    _ACTIVE_BOTTOM = SCREEN_H - CHROME_BOTTOM_DEFAULT_H
+    _ACTIVE_TOP = CHROME_TOP_H
+    _ACTIVE_BOTTOM = SCREEN_H - CHROME_BOTTOM_H
     _HISTORY_Y0 = _ACTIVE_TOP
-    _INPUT_Y = _ACTIVE_BOTTOM - INPUT_CHAR_H - INPUT_BOTTOM_PAD   # 入力下余白を確保
-    _MESSAGE_Y = _INPUT_Y - INPUT_TOP_PAD - CHAR_H                # 入力上余白も確保
-    _HISTORY_ROWS = (_MESSAGE_Y - _HISTORY_Y0) // CHAR_H          # 動的算出
+    _INPUT_Y = _ACTIVE_BOTTOM - INPUT_CHAR_H - INPUT_BOTTOM_PAD
+    _MESSAGE_Y = _INPUT_Y - INPUT_TOP_PAD - CHAR_H
+    _HISTORY_ROWS = (_MESSAGE_Y - _HISTORY_Y0) // CHAR_H
 
 
 def _redraw_chrome():
-    """Chrome 画像を blit (theme 変更後・help 終了後の復元に使う)。"""
-    if _chrome_buf is None or not _HW:
+    """Chrome を動的描画 (hline + ハードウェア 6x8 フォント)。
+    Phase 6-B 段階では Terminus 12x24 フォント import を避け、軽量な
+    drawTxt6x8 でタイトルを描画する。Phase 6-B 後半で _draw_text_p1 に切替予定。"""
+    if not _HW:
         return
-    palette = _build_help_palette()
-    try:
-        _display.blit(_chrome_buf[1], 0, 0, -1, palette)
-    except TypeError:
-        _display.blit(_chrome_buf[1], 0, 0)
+    # 上部
+    if hasattr(_display, "hline"):
+        _display.hline(0, 0, SCREEN_W, COL_ACC)
+        _display.hline(0, CHROME_TOP_H - 1, SCREEN_W, COL_ACC)
+    # タイトル (6x8 ハードウェア、ACC 色) — 上 hline と下 hline の間に配置
+    title_y = (CHROME_TOP_H - 8) // 2   # 中央寄せ (6x8 のため H=8)
+    if title_y < 1:
+        title_y = 1
+    _display.text(CHROME_TITLE, 4, title_y, COL_ACC)
+    # 下部 (水平線 1 本のみ、screen 最下端から 2px 上)
+    if hasattr(_display, "hline"):
+        _display.hline(0, SCREEN_H - 2, SCREEN_W, COL_ACC)
 
 
 def _free_chrome():
-    """`_chrome_buf` を解放し、had_chrome (元々ロードされていたか) を返す。
-    `_maybe_load_chrome` が再ロード可能なので、help 用にメモリを開ける時に使う。"""
-    global _chrome_buf
-    had = _chrome_buf is not None
-    _chrome_buf = None
-    return had
+    """旧 API 互換のスタブ。chrome buf を持たなくなったので常に False を返す。"""
+    return False
 
 
 def _clear_active():
-    """動的領域のみクリア。chrome 未装着時は全画面クリアと等価。"""
+    """動的領域 (chrome の上下に挟まれた中央部) を BG 色でクリア。"""
     if not _HW:
         return
-    if _chrome_buf is None:
-        _display.fill(COL_BG)
-    else:
-        _display.fill_rect(0, _ACTIVE_TOP, SCREEN_W, _ACTIVE_BOTTOM - _ACTIVE_TOP, COL_BG)
+    _display.fill_rect(0, _ACTIVE_TOP, SCREEN_W, _ACTIVE_BOTTOM - _ACTIVE_TOP, COL_BG)
 
 
-_HELP_LINES = [
-    "Psephos Help",
-    "============",
-    "",
-    "Trig    sin cos tan asin acos atan atan2",
-    "ExpLog  exp log log10 sqrt pow",
-    "Round   floor ceil fabs abs round",
-    "Angle   radians degrees",
-    "Radix   hex bin oct int float",
-    "Const   pi e tau",
-    "Util    min max",
-    "Ans     ans  ans2..ans10",
-    "Vars    x = 3   (session only, no shadow of builtins)",
-    "Literal 1.5e-10   0xFF   0b101   0o777",
-    "",
-    "Keys",
-    "  Up/Down     history recall / restore",
-    "  Left/Right  cursor move",
-    "  Home/End    line start / end",
-    "  Backspace   delete before cursor",
-    "  Enter       evaluate",
-    "  ESC         quit Psephos",
-    "",
-    "Commands",
-    "  help              this screen",
-    "  theme             list available themes",
-    "  theme <name>      apply theme (default/amber/green/cyan/invert)",
-    "  clear             clear history (asks y/n)",
-    "",
-    "Press any key to return...",
-]
-
-
-HELP_PAGE_PATHS = ("/sd/psephos_help_p1.bin", "/sd/psephos_help_p2.bin")
-HELP_PAGE_BYTES = (SCREEN_W * SCREEN_H) // 2   # GS4_HMSB: 4bpp = 51,200 byte
-
-
-def _build_help_palette():
-    """16 エントリのテーマカラーパレットを GS4_HMSB FrameBuffer として構築。
-
-    画像のピクセル値 (セマンティック index) -> 実テーマ色 のマッピング:
-        0 -> COL_BG  (背景)
-        1 -> COL_FG  (本文)
-        2 -> COL_DIM (補足)
-        3 -> COL_ACC (見出し)
-        4..15 -> COL_FG (フォールバック、本来未使用)
-
-    GS4_HMSB packing: 1 byte = 2 pixel, high nibble = 偶数 index, low nibble = 奇数 index。
-    """
-    import framebuf
-    pal = bytearray(8)
-    pal[0] = (COL_BG << 4) | (COL_FG & 0x0F)    # px 0, 1
-    pal[1] = (COL_DIM << 4) | (COL_ACC & 0x0F)  # px 2, 3
-    fb = (COL_FG << 4) | (COL_FG & 0x0F)
-    for i in range(2, 8):
-        pal[i] = fb                              # px 4..15 fallback
-    return framebuf.FrameBuffer(pal, 16, 1, framebuf.GS4_HMSB)
-
-
-def _check_help_pages():
-    """全ヘルプページファイルの存在を確認。問題なければ True。"""
-    for path in HELP_PAGE_PATHS:
-        try:
-            with open(path, "rb") as f:
-                pass
-        except OSError:
-            return False
-    return True
+# Phase 6-D: ヘルプ画面の動的テキスト描画 (旧 PNG/bin 方式廃止)
+# セクションタイトル + インデントされた本文 の形式で 6x8 ハードウェアフォントで描画。
+# 将来 Pattern 2 (Terminus 8x16) に切替予定。
+_HELP_SECTIONS = (
+    ("Functions:", [
+        "sin cos tan asin acos atan atan2",
+        "exp log log10 sqrt pow",
+        "floor ceil fabs abs round",
+        "radians degrees",
+        "hex bin oct int float",
+        "min max",
+    ]),
+    ("Constants:", [
+        "pi e tau",
+    ]),
+    ("Recent results:", [
+        "ans  ans2..ans10",
+    ]),
+    ("Variables:", [
+        "x = 3   (session only)",
+    ]),
+    ("Literals:", [
+        "1.5e-10   0xFF   0b101   0o777",
+    ]),
+    ("Commands:", [
+        "help              this screen",
+        "theme             list themes",
+        "theme <name>      apply (default/amber/green/cyan/invert)",
+        "clear             clear history",
+        "cas [ans[N]]      show CAS layout",
+    ]),
+    ("Keys:",  [
+        "Enter=eval   ESC=quit",
+        "Up/Down=history   Left/Right=cursor",
+        "Home/End=line start/end   Bksp=delete",
+    ]),
+)
 
 
 def _show_help():
-    """ヘルプ画面を表示し、任意キーで戻る (1 ページずつロードで省メモリ)。"""
+    """ヘルプ画面を動的に描画 (chrome 動的化と同方針、51KB framebuf 確保なし)。
+    任意キーで戻る。テキストは 6x8 ハードウェアフォントで軽量。"""
     if not _HW:
-        for line in _HELP_LINES:
-            print(line)
+        for title, body in _HELP_SECTIONS:
+            print(title)
+            for line in body:
+                print("  " + line)
         return
-
-    if not _check_help_pages():
-        # フォールバック: テキストヘルプ (6x8 ASCII)
-        _clear()
-        for r, line in enumerate(_HELP_LINES):
-            if r >= ROWS:
-                break
-            _draw_text(0, r * CHAR_H, line[:COLS], COL_FG)
-        _show()
-        while True:
-            k = _read_key()
-            if isinstance(k, tuple):
-                continue
+    _clear_active()
+    y = _ACTIVE_TOP + 2
+    bot_limit = _ACTIVE_BOTTOM - CHAR_H
+    for title, body in _HELP_SECTIONS:
+        if y > bot_limit:
             break
-        return
-
-    import framebuf
-    try:
-        import gc
-        gc.collect()
-    except ImportError:
-        pass
-    palette = _build_help_palette()
-    page_buf = bytearray(HELP_PAGE_BYTES)               # 1 ページぶんのみ常駐
-    page_fb = framebuf.FrameBuffer(page_buf, SCREEN_W, SCREEN_H, framebuf.GS4_HMSB)
-    idx = 0
-    n_pages = len(HELP_PAGE_PATHS)
-
-    def _draw():
-        try:
-            with open(HELP_PAGE_PATHS[idx], "rb") as f:
-                f.readinto(page_buf)
-        except OSError:
-            return
-        _clear()
-        try:
-            _display.blit(page_fb, 0, 0, -1, palette)
-        except TypeError:
-            _display.blit(page_fb, 0, 0)
-        _show()
-
-    _draw()
+        _draw_text(2, y, title[:COLS], COL_ACC)
+        y += CHAR_H
+        for line in body:
+            if y > bot_limit:
+                break
+            _draw_text(8, y, line[:COLS - 1], COL_FG)
+            y += CHAR_H
+        y += 2   # セクション間の余白
+    # フッタ
+    if y <= bot_limit:
+        _draw_text(2, bot_limit, "Press any key...", COL_DIM)
+    _show()
     while True:
         k = _read_key()
-        if isinstance(k, tuple) and k[0] == "ESCSEQ":
-            seq = k[1]
-            if seq == b"[C" and idx < n_pages - 1:
-                idx += 1
-                _draw()
-            elif seq == b"[D" and idx > 0:
-                idx -= 1
-                _draw()
+        if isinstance(k, tuple):
             continue
-        # 通常キー (ESC 含む) で戻る
         break
 
 
@@ -2114,7 +2139,25 @@ def render(history, buf, cursor, message=""):
 
 # ---- メインループ --------------------------------------------------------
 
+def _diag(msg):
+    """デバッグ用ログ。SD は最小、usb_debug 優先 (メモリ確保失敗時の堅牢性)。"""
+    try:
+        import picocalc as _p
+        ud = getattr(_p, "usb_debug", None)
+        if ud:
+            ud("[PSEPHOS] " + msg)
+            return
+    except Exception:
+        pass
+    try:
+        with open("/sd/psephos_diag.log", "a") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+
 def main():
+    _diag("M0 main start")
     # 前回フリーズ等で残った大量メモリ (chrome_buf / framebuf / closure 等) を回収
     # ランチャ経由 exec(...) の前に動作した Python オブジェクトは sys.modules や
     # script_globals 由来でリークが残ることが実機で確認されている (2026-06-22)
@@ -2123,8 +2166,14 @@ def main():
         _gc.collect()
     except Exception:
         pass
+    _diag("M1 gc done")
     try:
         _main_run()
+    except Exception as _ex:
+        _diag("M2 _main_run raised: " + str(_ex)[:60])
+        raise
+    else:
+        _diag("M2 _main_run returned normally")
     finally:
         # 例外パスでも dupterm を必ず復元 (py_run.py の input() が動くように)
         if _HW:
@@ -2139,6 +2188,7 @@ _DUPTERM_PREV = [None]
 
 
 def _main_run():
+    _diag("R0 _main_run start")
     # ランチャ経由起動時のハードウェア・端末状態をクリーンアップ
     if _HW:
         # 1. dupterm を一時解除 (REPL とのキー入力競合を避ける)
@@ -2147,25 +2197,42 @@ def _main_run():
             _DUPTERM_PREV[0] = _os.dupterm(None)
         except Exception:
             pass
-        # 2. Core1 auto-refresh を再有効化 (停止状態なら復帰)
+        _diag("R1 dupterm None")
+        # 2. ランチャの ESC シーケンス等の残骸を完全ドレイン
+        #    (terminal output buf + keyboard MCU buf)
+        try:
+            picocalc.terminal.dryBuffer()
+            _drain = bytearray(16)
+            for _ in range(50):
+                n = picocalc.terminal.readinto(_drain)
+                if not n:
+                    break
+        except Exception:
+            pass
+        _diag("R2 drained")
+        # 3. Core1 auto-refresh を再有効化 (停止状態なら復帰)
         try:
             import picocalcdisplay
             picocalcdisplay.startAutoUpdate()
         except Exception:
             pass
-        # 3. menu 残骸をクリア (snake.py 等他アプリ準拠)
+        # 4. menu 残骸をクリア (snake.py 等他アプリ準拠)
         try:
             _display.fill(COL_BG)
             _display.show()
         except Exception:
             pass
+        _diag("R3 hw cleaned")
     _load_config()
+    _diag("R4 config loaded")
     _apply_theme(_config.get("theme", "default"))
     _maybe_load_chrome()           # chrome.bin があればレイアウトを更新 + 起動時に blit
+    _diag("R5 chrome loaded")
     _redraw_chrome()
     if _HW:
         _show()                     # chrome 表示確定
     history = History()
+    _diag("R6 history loaded items=" + str(len(history.items)))
     buf = ""
     cursor = 0          # buf 内のカーソル位置 (0 〜 len(buf))
     hist_idx = -1       # -1 = 編集中 (履歴閲覧モード外), 0 以上 = history.items のインデックス
@@ -2173,6 +2240,7 @@ def _main_run():
     saved_cursor = 0
     message = "Psephos  ENTER=eval  ESC=quit  type 'help' for keys"
     render(history, buf, cursor, message)
+    _diag("R7 initial render done, entering loop")
 
     def _load_hist(idx):
         # idx 番目の履歴を buf に読み込む
@@ -2180,6 +2248,7 @@ def _main_run():
 
     while True:
         key = _read_key()
+        _diag("L_key " + repr(key)[:40])
 
         # --- エスケープシーケンス (矢印, Home/End 等) ---
         if isinstance(key, tuple) and key[0] == "ESCSEQ":
@@ -2226,6 +2295,7 @@ def _main_run():
             continue
 
         if key == KEY_ESC:
+            _diag("L_ESC pressed, exiting")
             _clear()
             _show()
             # dupterm 復元は main() の finally で処理
@@ -2240,21 +2310,12 @@ def _main_run():
                 continue
             # --- 特殊コマンド: help / theme ---
             if expr == "help":
-                # ヘルプ用に chrome_buf (51200 byte) を解放してメモリ確保
-                _had_chrome = _free_chrome()
-                try:
-                    import gc as _gc
-                    _gc.collect()
-                except Exception:
-                    pass
+                # Phase 6-D: 動的ヘルプ (51KB framebuf 確保なし)
                 try:
                     _show_help()
                 except Exception as ex:
                     message = "Help err: " + str(ex)[:COLS - 10]
-                # 終了後 chrome を再ロード
-                if _had_chrome:
-                    _maybe_load_chrome()
-                _redraw_chrome()         # ヘルプ画面が画面全体を覆っていたので chrome を復元
+                _redraw_chrome()         # 全画面を覆ったので chrome を再描画
                 try:
                     import gc as _gc
                     _gc.collect()
@@ -2322,11 +2383,17 @@ def _main_run():
                 continue
             # --- 通常評価 ---
             try:
+                _diag("E0 evaluate start")
                 result = evaluate(expr)
+                _diag("E1 evaluate done")
                 res_str = _format(result)
+                _diag("E2 format done")
                 history.add(expr, res_str)
+                _diag("E3 history.add done")
                 _show_big_calc(expr, res_str)        # 2x 全画面表示 → 任意キーで戻る
+                _diag("E4 show_big_calc done")
                 _redraw_chrome()
+                _diag("E5 redraw_chrome done")
                 message = ""
             except NameError:
                 # 未定義変数を含む式: 数値計算は不能だが symbolic 表示する
@@ -2337,6 +2404,7 @@ def _main_run():
             except ZeroDivisionError:
                 message = "Error: division by zero"
             except Exception as ex:
+                _diag("EX " + str(ex)[:60])
                 message = "Error: " + str(ex)[:COLS - 8]
             buf = ""
             cursor = 0
@@ -2354,7 +2422,9 @@ def _main_run():
         if isinstance(key, str) and len(key) == 1 and 32 <= ord(key) < 127:
             buf = buf[:cursor] + key + buf[cursor:]
             cursor += 1
+            _diag("Lchar_before_render buf=" + repr(buf)[:30])
             render(history, buf, cursor, message)
+            _diag("Lchar_after_render")
 
 
 def _format(value):

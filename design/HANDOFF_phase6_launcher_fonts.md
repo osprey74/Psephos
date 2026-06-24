@@ -230,27 +230,63 @@ def _draw_chrome():
 
 ---
 
-## 3. 実装順序（推奨）
+## 3. 実装状況（2026-06-24 現在）
 
-1. **Phase 6-A: 自前ランチャ** — `main.py` を Psephos 起動専用に書換え、`machine.soft_reset()` で終了
-   - 既存 `main.py`（`from py_run import main_menu`）は `main_lofifren.py` 等で退避
-   - Psephos の `main()` 末尾 finally に `_os.dupterm` 復元の後に `machine.soft_reset()` 追加
-   - 動作確認：LofiFren ランチャ経由ではなく直接起動するか、2 回起動 → メモリリーク無いか
+### 完了 ✅
 
-2. **Phase 6-B: bitmap フォント** — `_FONT_8X8` を組み込み、`_draw_text_*` 系を置換
-   - データ生成スクリプト（PC 側）を 1 つ作って `_FONT_8X8 = (...)` を psephos.py に埋め込む
-   - `_draw_char_8x8(x, y, ch, color, scale)` を実装、`_draw_text_2x`/`_3x`/`_hist` から呼出
-   - 共有 tmp framebuf は不要になるので削除
-   - 動作確認：表示は変わらず、複雑式の描画が体感で速くなっているか
+- **Phase 6-C: chrome.bin 廃止 + 動的描画** — `_maybe_load_chrome` をレイアウト定数更新のみのスタブに、`_redraw_chrome` を `hline + _display.text` (6×8 hardware) に置換。51KB framebuf 確保ゼロ。
+- **Phase 6-D: help bin 廃止 + 動的描画** — `_HELP_LINES` を `_HELP_SECTIONS = [("Functions:", [...lines...]), ...]` 形式に変更。`_show_help` はセクション見出し (ACC) + インデント本文 (FG) を 6×8 hardware で描画。51KB 確保なし。
+- **Phase 6-B step 1: フォントロードインフラ** — `_FONT_CACHE` + `_get_font(name)` 遅延ロード + `_draw_text_bm(x, y, s, color, font_name)` + `_draw_text_p1/p2/p3` ラッパ追加。9 種の Terminus/Spleen bitmap モジュールを `/sd/py_scripts/` に配置済（変換器: `fonts/bdf_to_py.py`、サンプラ: `fonts/font_sampler.py` / `fonts/psephos_preview.py`）。
+- **`_diag` ログ機構** — `picocalc.usb_debug` 優先 + SD フォールバック。メモリ確保失敗時も診断可能。
 
-3. **Phase 6-C: chrome.bin 廃止 + 動的描画** — フォント実装に依存するため Phase 6-B の直後
-   - `_draw_chrome()` を新設し、`_maybe_load_chrome` / `_redraw_chrome` を置換
-   - chrome 用ヘッダ文字列のレイアウト（320 px 内に収める）を確定
-   - 動作確認：chrome.bin を SD から消しても起動できる、テーマ切替で色が追随する
+### 未統合（重要）
 
-4. **Phase 5: plot 実装の復元** — 2026-06-22 セッションで `git stash@{0}` に避難済の plot 実装を取り出して適用
-   - `git stash pop stash@{0}` で復元
-   - Phase 6-A/B/C 上に重ねて動作確認
+**Phase 6-B step 1 は infra のみで、実際の描画は依然として旧フォント** を使っている：
+
+| 描画箇所 | 現状 | 意図 |
+|---|---|---|
+| chrome 上部ヘッダ | 6×8 hardware `_display.text` | Terminus 12×24 (Pattern 1) |
+| 計算履歴 | 6×8 hardware | Terminus 8×16 (Pattern 2) |
+| 入力欄 | 16×16 (8×8 → 2× soft scale) | Terminus 12×24 (Pattern 1) |
+| CAS 数式テキスト | 16×16 (8×8 → 2× soft scale) | Terminus 12×24 (Pattern 1) |
+| CAS 指数 | 8×8 framebuf | Terminus 8×16 (Pattern 2) |
+| ヘルプ本文 | 6×8 hardware | Terminus 8×16 (Pattern 2) |
+| big_calc 結果行 | 16×16 (8×8 → 2× soft scale) | Terminus 16×32 (Pattern 3) |
+| Greek glyph | 16×16 → 32×32 custom render | 維持 (Pattern 3 と同サイズ) |
+
+未統合の理由：起動シーケンス中に Terminus 12×24 (20 KB) / 16×32 (27 KB) を import すると、LofiFren ランチャの抱える状態 + psephos.py モジュールロード (~67 KB) と合算してメモリ断片化を悪化させ、起動失敗 (`MemoryError: 51200 byte`) を招くため。
+
+### 残課題
+
+LofiFren ランチャ経由で **複数回の計算を繰返すと途中でフリーズ** する症状あり（closure 累積・framebuf 一時バッファ・履歴データなどの蓄積が原因）。Phase 6-A の実装で根治予定。
+
+## 4. 次セッション以降の実装順序（方針: Aで進める）
+
+総司様の方針：**Phase 6-A を先に実装してメモリを確保してから、Phase 6-B 後半（Terminus 統合）を段階導入**する。
+
+1. **Phase 6-A: 自前ランチャ + `machine.soft_reset()`** — 最優先
+   - `/main.py` を Psephos 起動専用に書換え（現在の LofiFren `main.py` は `main_lofifren.py` 等で退避）
+   - Psephos の `main()` 末尾 finally で `machine.soft_reset()` 呼出
+   - 起動毎にヒープ完全クリア → 連続 51KB 確保問題と closure 累積を根治
+   - 動作確認：5 回連続起動でメモリリーク無し、繰返し計算でフリーズしない
+
+2. **Phase 6-B step 2: Terminus フォント 1 つずつ段階導入**
+   - 例: chrome 上部ヘッダだけ Terminus 12×24 に切替 → 動作確認 → 次へ
+   - 失敗したら 1 つ前のステップに戻す
+   - 完成形：chrome / 入力 / CAS / 履歴 / 指数 / ヘルプ / big_calc が Terminus 各サイズで描画
+   - フォント data は遅延ロード (`_get_font`) で必要時のみ heap 消費
+
+3. **Phase 5: plot 実装の復元** — Phase 6-A 完了後
+   - `git stash list` で stash@{0} を確認
+   - `git stash pop stash@{0}` で復元 (conflict 解消必要かも)
+   - Phase 6 完成形の上に重ねて動作確認
+
+## 5. 既知の警告 / 注意
+
+- `_FONT_CACHE` は無制限に成長する。Phase 6-A 実装で soft_reset により都度クリアされる前提。
+- `_draw_text_p1/p2/p3` は `_get_font` 失敗時 (PC 環境や import エラー) は無音で何もしない。
+- `picocalc.usb_debug` は boot.py で `_usb = sys.stdout` から束ねたもの。dupterm None 後も USB へ流れる。
+- diag 関数の呼出はそのまま残置。本番運用前に grep して削除推奨（パフォーマンス影響あり）。
 
 ---
 
