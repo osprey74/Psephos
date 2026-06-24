@@ -1676,14 +1676,6 @@ def _show_big_calc(expr_str, res_str):
     if not _HW:
         print(expr_str + (" = " + res_str if res_str is not None else "  (symbolic)"))
         return
-    # まず "Rendering..." インジケータを描画 + 即 push して、
-    # 重い CAS layout / Greek glyph 描画中もユーザに反応中であることを示す
-    try:
-        _clear_active()
-        _draw_text(SCREEN_W // 2 - 60, _ACTIVE_TOP + 8, "Rendering...", COL_DIM)
-        _show()
-    except Exception:
-        pass
     max_cols = SCREEN_W // _CAS_CHAR_W
 
     def _trunc(s):
@@ -1770,13 +1762,6 @@ def _show_cas(expr_str):
     if not _HW:
         print("CAS:", expr_str)
         return
-    # "Rendering..." インジケータ (Greek glyph 32x32 等の重い描画中の反応表示)
-    try:
-        _clear_active()
-        _draw_text(SCREEN_W // 2 - 60, _ACTIVE_TOP + 8, "Rendering...", COL_DIM)
-        _show()
-    except Exception:
-        pass
     try:
         node = _cas_parse(expr_str)
         box = _cas_layout(node)
